@@ -2,6 +2,8 @@
 
 export const S = { me: null, settings: null, categories: null };
 export const isAdmin = () => S.me && S.me.role === 'admin';
+export const isPlayer = () => S.me && S.me.role === 'player';
+export const ROLE = { admin: 'Administratör', viewer: 'Läsbehörighet', player: 'Spelare' };
 
 // ---------- API ----------
 export class ApiError extends Error { constructor(msg, status, code) { super(msg); this.status = status; this.code = code; } }
@@ -54,6 +56,11 @@ export const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&a
 export const STATUS = { obetald: ['Obetald', 'red'], delvis: ['Delvis betald', 'amber'], betald: ['Betald', 'green'], makulerad: ['Makulerad', 'grey'] };
 export const statusPill = (s) => `<span class="pill ${STATUS[s][1]}">${STATUS[s][0]}</span>`;
 export const demoTag = (x) => (x ? '<span class="pill demo" title="Exempeldata – inte en riktig registrering">Exempel</span>' : '');
+// Belopp för en bot: slutbelopp, och vid juniorrabatt även ordinarie belopp och rabatt.
+export const fineAmt = (f) => `${kr(f.amount)}${f.discount_amount > 0 ? `<br><small class="muted">ord. ${kr(f.base_amount)} · junior −${kr(f.discount_amount)}</small>` : ''}`;
+export const juniorTag = (p) => (p && p.junior_discount > 0 ? `<span class="pill junior" title="Juniorrabatt ${p.junior_discount} % på nya böter">Junior −${p.junior_discount} %</span>` : '');
+export const REPORT = { pending: ['Väntar på godkännande', 'amber'], disputed: ['Bestriden – admin avgör', 'red'], approved: ['Godkänd', 'green'], rejected: ['Avslagen', 'grey'] };
+export const reportPill = (s) => `<span class="pill ${REPORT[s][1]}">${REPORT[s][0]}</span>`;
 export const placeBadge = (p) => `<span class="place p${p <= 3 ? p : 'n'}">${p}</span>`;
 export const icon = (name) => `<svg class="ic" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 export const playerOpts = (players, sel, { activeOnly = true, includeDemo = true } = {}) => players

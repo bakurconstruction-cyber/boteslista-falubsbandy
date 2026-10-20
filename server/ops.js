@@ -39,9 +39,11 @@ function inSeason(season, d, field) {
 const kr = (ore) => (ore / 100).toLocaleString('sv-SE', { minimumFractionDigits: ore % 100 ? 2 : 0, maximumFractionDigits: 2 }) + ' kr';
 const now = () => new Date().toISOString();
 const J = (o) => (o == null ? null : JSON.stringify(o));
+// Läsbart namn i loggar och "registrerad av": spelarkonton visas som "#10 Förnamn Efternamn".
+const who = (user) => user.label || user.username;
 
 async function audit(db, user, action, entity, entityId, oldV, newV, reason) {
-  (await db.run('INSERT INTO audit_log (ts, username, action, entity, entity_id, old_value, new_value, reason) VALUES (?,?,?,?,?,?,?,?)', now(), user.username, action, entity, entityId == null ? null : String(entityId), J(oldV), J(newV), reason || null));
+  (await db.run('INSERT INTO audit_log (ts, username, action, entity, entity_id, old_value, new_value, reason) VALUES (?,?,?,?,?,?,?,?)', now(), who(user), action, entity, entityId == null ? null : String(entityId), J(oldV), J(newV), reason || null));
 }
 
 async function getPlayer(db, id) {
@@ -85,17 +87,41 @@ async function createPlayer(db, user, body, { isDemo = false } = {}) {
   const p = playerInput(body);
   const n = await nextNumber(db, isDemo ? 'demo_player' : 'player');
   const id = (isDemo ? 'X-S' : 'S-') + String(n).padStart(3, '0');
-  (await db.run('INSERT INTO players (id, first_name, last_name, jersey, position, notes, active, is_demo, created_at) VALUES (?,?,?,?,?,?,1,?,?)', id, p.first_name, p.last_name, p.jersey, p.position, p.notes, isDemo ? 1 : 0, body.created_at || now()));
-  await audit(db, user, 'Spelare skapad', 'spelare', id, null, p);
+  const junior = body.junior_discount === true || body.junior_discount === 'on' || Number(body.junior_discount) === 50 ? 50 : 0;
+  (await db.run('INSERT INTO players (id, first_name, last_name, jersey, position, notes, active, is_demo, junior_discount, created_at) VALUES (?,?,?,?,?,?,1,?,?,?)', id, p.first_name, p.last_name, p.jersey, p.position, p.notes, isDemo ? 1 : 0, junior, body.created_at || now()));
+  await audit(db, user, 'Spelare skapad', 'spelare', id, null, { ...p, ...(junior ? { juniorrabatt: `${junior} %` } : {}) });
   return id;
 }
 async function updatePlayer(db, user, id, body) {
   return tx(async (db) => {
     const old = await getPlayer(db, id);
     const p = playerInput(body);
+    if (p.jersey !== old.jersey) await assertJerseyFreeForLogin(db, old.id, p.jersey);
     (await db.run('UPDATE players SET first_name=?, last_name=?, jersey=?, position=?, notes=? WHERE id=?', p.first_name, p.last_name, p.jersey, p.position, p.notes, old.id));
     await audit(db, user, 'Spelare ändrad', 'spelare', old.id,
       { first_name: old.first_name, last_name: old.last_name, jersey: old.jersey, position: old.position, notes: old.notes }, p);
+  });
+}
+// Spelare loggar in med tröjnumret, så två spelarkonton kan inte ha samma nummer.
+async function assertJerseyFreeForLogin(db, playerId, jersey) {
+  const hasAccount = await db.get('SELECT 1 AS x FROM users WHERE player_id = ?', playerId);
+  if (!hasAccount || !jersey) {
+    if (hasAccount && !jersey) fail('Spelaren har ett spelarkonto och loggar in med tröjnumret – tröjnumret kan inte tas bort. Stäng av kontot först.');
+    return;
+  }
+  const clash = await db.get(`SELECT p.first_name, p.last_name FROM players p JOIN users u ON u.player_id = p.id
+    WHERE p.jersey = ? AND p.id <> ? AND p.is_demo = 0`, jersey, playerId);
+  if (clash) fail(`Tröjnummer ${jersey} används redan för inloggning av ${clash.first_name} ${clash.last_name}. Byt nummer på den spelaren först.`, 409);
+}
+// Juniorrabatt slås på/av per spelare (spelar-ID). Påverkar bara böter som blir officiella efter ändringen.
+async function setJuniorDiscount(db, user, id, enabled) {
+  return tx(async (db) => {
+    const p = await getPlayer(db, id);
+    const pct = enabled ? 50 : 0;
+    if (p.junior_discount === pct) return;
+    (await db.run('UPDATE players SET junior_discount = ? WHERE id = ?', pct, p.id));
+    await audit(db, user, enabled ? 'Juniorrabatt aktiverad' : 'Juniorrabatt avstängd', 'spelare', p.id,
+      { juniorrabatt: `${p.junior_discount} %` }, { juniorrabatt: `${pct} %`, gäller: 'nya böter – befintliga böter ändras inte' });
   });
 }
 async function setPlayerActive(db, user, id, active) {
@@ -169,7 +195,7 @@ async function updateCategory(db, user, id, body) {
 // ---------- Böter ----------
 const RULE_KINDS = { no_fines: 22, least_fines: 23, late: 29 };
 // Skapar en bot (anropas inom en transaktion). Returnerar bötesnumret.
-async function insertFine(db, user, season, input, { isDemo = false, ruleKey = null, allowRuleKind = false } = {}) {
+async function insertFine(db, user, season, input, { isDemo = false, ruleKey = null, allowRuleKind = false, fixedAmount = null, reportId = null } = {}) {
   const player = await getPlayer(db, input.player_id);
   isDemo = isDemo || !!player.is_demo; // böter till exempelspelare blir automatiskt exempeldata
   if (!player.active && !isDemo) fail(`${player.first_name} ${player.last_name} är inaktiv. Aktivera spelaren för att registrera nya böter.`);
@@ -201,8 +227,11 @@ async function insertFine(db, user, season, input, { isDemo = false, ruleKey = n
     if (ref.voided) fail(`${no} är makulerad och kan inte användas som planterad bot.`);
     if (ref.is_demo && !isDemo) fail(`${no} är exempeldata och kan inte användas för en riktig spelare.`);
     if (ref.kind === 'planted') fail(`${no} är själv en planterad bot. Ange den ursprungliga boten.`);
-    amount = ref.amount; refId = ref.id;
+    amount = ref.base_amount ?? ref.amount; refId = ref.id; // ordinarie belopp, inte en annan spelares rabatterade
     calc = `Samma belopp som ${ref.fine_no} (${ref.category_name}): ${kr(amount)}`;
+  } else if (fixedAmount != null) {
+    amount = fixedAmount; // från en godkänd anmälan: standardbeloppet som gällde när den skickades in
+    if (quantity > 1) calc = `${quantity} × ${kr(Math.round(amount / quantity))} = ${kr(amount)}`;
   } else {
     const standard = cat.default_amount * quantity;
     amount = input.amount != null && input.amount !== '' ? parseKr(input.amount) : standard;
@@ -211,16 +240,26 @@ async function insertFine(db, user, season, input, { isDemo = false, ruleKey = n
   }
   if (amount <= 0) fail('Bötesbeloppet måste vara större än 0 kr.');
   if (amount > MAX_AMOUNT) fail('Bötesbeloppet är orimligt högt.');
+  // Juniorrabatt: räknas en gång, när boten blir officiell, på spelarens ordinarie belopp.
+  const d = discountFor(amount, player.junior_discount);
+  if (d.discount) calc = (calc ? calc + ' · ' : '') + `Juniorrabatt ${d.pct} %: ${kr(amount)} − ${kr(d.discount)} = ${kr(d.final)}`;
   const no = isDemo ? 'X-' + String(await nextNumber(db, 'demo_fine')).padStart(4, '0') : 'B-' + String(await nextNumber(db, 'fine')).padStart(4, '0');
   try {
     (await db.run(`INSERT INTO fines (fine_no, season_id, player_id, category_id, category_name, category_number, kind, issued_date, due_date,
-      description, quantity, amount, ref_fine_id, rule_key, calc, registered_by, is_demo, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, no, season.id, player.id, cat.id, cat.name, cat.number, cat.kind, issued, due, description, quantity, amount, refId, ruleKey, calc, user.username, isDemo ? 1 : 0, now()));
+      description, quantity, amount, base_amount, discount_amount, discount_pct, report_id, ref_fine_id, rule_key, calc, registered_by, is_demo, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, no, season.id, player.id, cat.id, cat.name, cat.number, cat.kind, issued, due, description, quantity, d.final, amount, d.discount, d.pct, reportId, refId, ruleKey, calc, who(user), isDemo ? 1 : 0, now()));
   } catch (e) {
+    if (e.code === '23505' && reportId) fail('Anmälan har redan blivit en bot.', 409, 'already_decided');
     if (e.code === '23505' && ruleKey) fail(`${player.first_name} ${player.last_name} har redan fått bot nr ${cat.number} för denna period.`, 409, 'duplicate_rule');
     throw e;
   }
-  await audit(db, user, 'Bot registrerad', 'bot', no, null, { spelare: `${player.first_name} ${player.last_name}`, kategori: `${cat.number}. ${cat.name}`, belopp: kr(amount), datum: issued, förfaller: due, beskrivning: description, beräkning: calc });
+  await audit(db, user, 'Bot registrerad', 'bot', no, null, { spelare: `${player.first_name} ${player.last_name}`, kategori: `${cat.number}. ${cat.name}`, belopp: kr(d.final), ...(d.discount ? { ordinarie: kr(amount), juniorrabatt: kr(d.discount) } : {}), datum: issued, förfaller: due, beskrivning: description, beräkning: calc });
   return no;
+}
+function discountFor(base, pct) {
+  pct = Number(pct) || 0;
+  if (pct <= 0) return { final: base, discount: 0, pct: 0 };
+  const discount = Math.floor((base * pct) / 100); // avrundas nedåt → spelaren betalar aldrig 0 kr
+  return { final: base - discount, discount, pct };
 }
 async function createFines(db, user, season, items) {
   if (!Array.isArray(items) || !items.length) fail('Inga böter att registrera.');
@@ -241,7 +280,11 @@ async function editFine(db, user, season, id, body) {
     const due = date(body.due_date ?? f.due_date, 'Sista betalningsdag');
     if (due < issued) fail('Sista betalningsdag kan inte vara före utfärdandedatum.');
     const description = str(body.description ?? f.description, 'Beskrivning', { max: 500 });
-    const amount = body.amount != null && body.amount !== '' ? parseKr(body.amount) : f.amount;
+    // För en bot med juniorrabatt anges ordinarie belopp; rabatten (samma procent som när boten
+    // utfärdades) räknas om – den läggs aldrig på en gång till.
+    const base = body.amount != null && body.amount !== '' ? parseKr(body.amount) : (f.base_amount ?? f.amount);
+    const d = f.discount_pct > 0 ? discountFor(base, f.discount_pct) : { final: base, discount: 0, pct: 0 };
+    const amount = d.final;
     const paid = await fineAllocated(db, f.id);
     if (amount < paid) fail(`Beloppet kan inte sättas lägre än det som redan betalats mot boten (${kr(paid)}). Återför eller flytta betalningen först.`);
     if (f.kind === 'planted' && amount !== f.amount) fail('Beloppet för en planterad bot hämtas från den ursprungliga boten och kan inte ändras.');
@@ -250,7 +293,8 @@ async function editFine(db, user, season, id, body) {
       if (v !== f[k]) { old[k] = k === 'amount' ? kr(f[k]) : f[k]; changes[k] = k === 'amount' ? kr(v) : v; }
     }
     if (!Object.keys(changes).length) fail('Inga ändringar att spara.');
-    (await db.run('UPDATE fines SET issued_date=?, due_date=?, description=?, amount=? WHERE id=?', issued, due, description, amount, f.id));
+    if (d.discount && changes.amount) { old.ordinarie = kr(f.base_amount ?? f.amount); changes.ordinarie = kr(base); changes.juniorrabatt = kr(d.discount); }
+    (await db.run('UPDATE fines SET issued_date=?, due_date=?, description=?, amount=?, base_amount=?, discount_amount=? WHERE id=?', issued, due, description, amount, f.base_amount == null && !d.discount ? null : base, d.discount, f.id));
     await audit(db, user, 'Bot ändrad', 'bot', f.fine_no, old, changes, reason);
   });
 }
@@ -557,10 +601,101 @@ async function removeDemo(db, user) {
   });
 }
 
+// ---------- Bötesanmälningar ----------
+// En anmälan är bara ett förslag. Den påverkar inte skuld, kassa eller leaderboard förrän den
+// godkänts – då skapas exakt en officiell bot via insertFine (samma kod som vanliga böter).
+const REPORT_KINDS = ['fixed', 'per_item'];
+async function getReport(db, id) {
+  const r = await db.get('SELECT * FROM fine_reports WHERE id = ?', Number(id));
+  if (!r) fail('Anmälan finns inte.', 404);
+  return r;
+}
+async function createReport(db, user, season, body) {
+  return tx(async (db) => {
+    if (user.role !== 'player' || !user.player_id) fail('Endast spelarkonton kan anmäla böter.', 403);
+    const reporter = await getPlayer(db, user.player_id);
+    const target = await getPlayer(db, body.player_id);
+    if (target.id === reporter.id) fail('Du kan inte anmäla dig själv.');
+    if (target.is_demo) fail('Exempelspelare kan inte anmälas.');
+    if (!target.active) fail(`${target.first_name} ${target.last_name} är inaktiv och kan inte anmälas.`);
+    const cat = await db.get('SELECT * FROM categories WHERE id = ?', Number(body.category_id));
+    if (!cat) fail('Välj en böteskategori.');
+    if (!cat.active) fail(`Kategorin "${cat.name}" är inaktiverad.`);
+    if (!REPORT_KINDS.includes(cat.kind)) fail(`Bot nr ${cat.number} kan inte anmälas – den hanteras av administratören.`);
+    let quantity = 1;
+    if (cat.kind === 'per_item') {
+      quantity = Number(body.quantity || 1);
+      if (!Number.isInteger(quantity) || quantity < 1 || quantity > 30) fail('Antal måste vara ett heltal mellan 1 och 30.');
+    }
+    const incident = date(body.incident_date || L.todayStr(), 'Datum för händelsen');
+    notFuture(incident, 'Datum för händelsen');
+    inSeason(season, incident, 'Datum för händelsen');
+    const comment = str(body.comment, 'Kommentar', { max: 300 });
+    const key = body.idempotency_key ? str(body.idempotency_key, 'Nyckel', { max: 80 }) : null;
+    if (key) {
+      const ex = await db.get('SELECT report_no FROM fine_reports WHERE idempotency_key = ?', key);
+      if (ex) fail(`Anmälan är redan skickad (${ex.report_no}).`, 409, 'already_registered');
+    }
+    const dup = await db.get(`SELECT report_no FROM fine_reports WHERE reporter_user_id = ? AND player_id = ? AND category_id = ?
+      AND incident_date = ? AND status IN ('pending','disputed')`, user.id, target.id, cat.id, incident);
+    if (dup) fail(`Du har redan en öppen anmälan av ${target.first_name} för samma bot och dag (${dup.report_no}).`, 409, 'duplicate_report');
+    const amount = cat.default_amount * quantity;
+    if (amount <= 0) fail('Kategorin saknar standardbelopp.');
+    const no = 'A-' + String(await nextNumber(db, 'report')).padStart(4, '0');
+    const reporterName = `${reporter.first_name} ${reporter.last_name}`;
+    const r = await db.get(`INSERT INTO fine_reports (report_no, season_id, player_id, category_id, category_name, category_number, quantity, amount,
+      incident_date, comment, reporter_user_id, reporter_player_id, reporter_name, reporter_jersey, status, idempotency_key, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?) RETURNING *`, no, season.id, target.id, cat.id, cat.name, cat.number, quantity, amount,
+      incident, comment, user.id, reporter.id, reporterName, reporter.jersey, key, now());
+    await audit(db, user, 'Bot anmäld', 'anmälan', no, null, { anmäld: `${target.first_name} ${target.last_name}`, kategori: `${cat.number}. ${cat.name}`, belopp: kr(amount), datum: incident, kommentar: comment, anmälare: reporterName });
+    return r;
+  });
+}
+async function approveReport(db, user, season, id, { asPlayer = false, note = '' } = {}) {
+  return tx(async (db) => {
+    const r = await getReport(db, id);
+    if (asPlayer) {
+      if (user.player_id !== r.player_id) fail('Bara den anmälda spelaren kan godkänna sin anmälan.', 403);
+      if (r.status !== 'pending') fail(r.status === 'disputed' ? 'Du har bestridit anmälan – administratören avgör den nu.' : 'Anmälan är redan avgjord.', 409, 'already_decided');
+    } else if (!['pending', 'disputed'].includes(r.status)) fail('Anmälan är redan avgjord.', 409, 'already_decided');
+    if (r.fine_id) fail('Anmälan har redan blivit en bot.', 409, 'already_decided');
+    const desc = `Anmälan ${r.report_no} av ${r.reporter_jersey ? `#${r.reporter_jersey} ` : ''}${r.reporter_name} (händelse ${r.incident_date})${r.comment ? `: ${r.comment}` : ''}`.slice(0, 500);
+    const fineNo = await insertFine(db, user, season, { player_id: r.player_id, category_id: r.category_id, quantity: r.quantity, issued_date: L.todayStr(), description: desc },
+      { fixedAmount: r.amount, reportId: r.id });
+    const fine = await db.get('SELECT id FROM fines WHERE fine_no = ?', fineNo);
+    const decisionNote = str(note, 'Kommentar', { max: 300 });
+    const upd = await db.run(`UPDATE fine_reports SET status = 'approved', fine_id = ?, decided_by = ?, decided_at = ?, decision_note = ?, approved_by_player = ? WHERE id = ? AND status IN ('pending','disputed') AND fine_id IS NULL`,
+      fine.id, who(user), now(), decisionNote || null, asPlayer ? 1 : 0, r.id);
+    if (upd.changes !== 1) fail('Anmälan är redan avgjord.', 409, 'already_decided'); // transaktionen rullas tillbaka – ingen bot skapas
+    await audit(db, user, asPlayer ? 'Anmälan godkänd av den anmälde' : 'Anmälan godkänd', 'anmälan', r.report_no, { status: r.status }, { status: 'godkänd', bot: fineNo });
+    return { fine_no: fineNo };
+  });
+}
+async function disputeReport(db, user, id, body) {
+  return tx(async (db) => {
+    const r = await getReport(db, id);
+    if (user.player_id !== r.player_id) fail('Bara den anmälda spelaren kan bestrida sin anmälan.', 403);
+    if (r.status !== 'pending') fail('Anmälan kan inte bestridas i nuvarande status.', 409, 'already_decided');
+    const reason = str(body.reason, 'Varför du bestrider', { required: true, max: 300 });
+    (await db.run("UPDATE fine_reports SET status = 'disputed', dispute_reason = ?, disputed_at = ? WHERE id = ?", reason, now(), r.id));
+    await audit(db, user, 'Anmälan bestriden', 'anmälan', r.report_no, { status: 'väntar' }, { status: 'bestriden' }, reason);
+  });
+}
+async function rejectReport(db, user, id, body) {
+  return tx(async (db) => {
+    const r = await getReport(db, id);
+    if (!['pending', 'disputed'].includes(r.status)) fail('Anmälan är redan avgjord.', 409, 'already_decided');
+    const reason = str(body.reason, 'Anledning', { required: true, max: 300 });
+    (await db.run("UPDATE fine_reports SET status = 'rejected', decided_by = ?, decided_at = ?, decision_note = ? WHERE id = ?", who(user), now(), reason, r.id));
+    await audit(db, user, 'Anmälan avslagen', 'anmälan', r.report_no, { status: r.status }, { status: 'avslagen' }, reason);
+  });
+}
+
 module.exports = {
   AppError, fail, parseKr, kr, audit, METHODS,
   createPlayer: (db, user, body) => tx(async (db) => await createPlayer(db, user, body)),
-  updatePlayer, setPlayerActive, deletePlayer, importPlayers, updateCategory,
+  updatePlayer, setPlayerActive, deletePlayer, importPlayers, updateCategory, setJuniorDiscount, assertJerseyFreeForLogin,
+  createReport, approveReport, disputeReport, rejectReport, getPlayer, who,
   createFines, editFine, voidFine, createPayment, allocateCredit, reversePayment,
   createCashEvent, voidCashEvent, applyRule, closeMonth, updateSettings, updateSeason, seedDemo, removeDemo, playerCredit,
 };

@@ -52,6 +52,21 @@ Exempeldata (märkt "Exempel", nummer `X-…`) kan läggas in och tas bort under
 
 Kortkommandon: **N** = ny bot, **B** = ny inbetalning.
 
+## Spelarkonton och bötesanmälningar
+
+- **Spelarkonton** skapas av administratören under **Inställningar → Användare → Spelarkonton** (eller på spelarens sida). Spelaren loggar in med sitt **tröjnummer** och ett eget lösenord. Kontot är kopplat till spelar-ID:t; två spelarkonton kan inte ha samma tröjnummer.
+- **Behörighet (kontrolleras i servern):** spelare kan läsa översikt, leaderboard och böteshistorik och anmäla böter. De kan inte registrera eller ändra böter, betalningar, saldon, konton eller inställningar. Inaktiv spelare kan inte logga in.
+- **Anmälan:** spelaren väljer lagkamrat, bot (fasta böter och per-styck-böter) och ev. kommentar. Standardbeloppet hämtas från böteslistan. Anmälaren (tröjnummer och namn) sparas automatiskt från kontot. Varje anmälan får ett eget ID (`A-0001` …).
+- **Godkännande:** status *Väntar på godkännande* → den anmälde kan **godkänna** eller **bestrida**. Bestridda går till administratören, som kan godkänna eller avslå (med anledning). Endast godkännande skapar en officiell bot med eget bötesnummer – en gång. Databasen hindrar att en anmälan blir mer än en bot. Väntande, bestridda och avslagna anmälningar påverkar varken skuld, kassa eller leaderboard.
+- Godkänd bot dateras **godkännandedagen** (händelsedatumet står i beskrivningen), så redan avstämda månader och förseningsregeln påverkas inte i efterhand.
+
+## Juniorrabatt
+
+- Slås på/av per spelare på **spelarens sida** (administratör). Kopplad till spelar-ID – byter spelaren tröjnummer följer rabatten med honom, och en ny nr 10 får den inte automatiskt.
+- 50 % dras **när en bot blir officiell** (direktregistrerad, godkänd anmälan eller regelbot). Boten sparar **ordinarie belopp, rabatt och belopp att betala**; böteslistans standardbelopp ändras aldrig.
+- Rabatten räknas en gång per bot. Ändras beloppet i efterhand anges ordinarie belopp och samma procentsats räknas om.
+- Skuld, betalningar, kassa, leaderboard och export räknar med beloppet att betala. Befintliga böter ändras aldrig när rabatten slås på eller av.
+
 ## Hur reglerna fungerar
 
 - **Sista betalningsdag** = sista kalenderdagen i den månad boten utfärdades (kan ändras per bot).
@@ -100,9 +115,4 @@ test/              automatiska tester av arbetsflödena
 ```
 
 ## Om funktionen
-`netlify/functions/api.mjs` är en färdigpaketerad fil (allt inklusive `pg` i en fil). Källan är `netlify/src/api.mjs`. Efter ändringar i `server/` bygger du om den med:
-
-```bash
-npx esbuild netlify/src/api.mjs --bundle --platform=node --target=node20 --format=esm --external:pg-native --outfile=netlify/functions/api.mjs --banner:js="import { createRequire as __cr } from 'module'; const require = __cr(import.meta.url);"
-```
-(och ändra sedan `var config` till `export const config` i slutet av filen)
+`netlify/functions/api.mjs` är en färdigpaketerad fil (hela API:t inklusive `pg`). Källan är `netlify/src/api.mjs` och `server/`. Efter ändringar i `server/`: kör `npm run bundle` och committa den nya filen.

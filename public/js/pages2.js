@@ -1,6 +1,6 @@
 // Sidor: Leaderboard, Månadsskifte, Regler, Kassa, Inställningar
-import { S, get, post, put, del, esc, kr, krPlain, num, pct, fmtDate, fmtTs, monthName, seasonMonths, today, demoTag, placeBadge, icon, isAdmin, barChart, empty, confirmDialog, toast, fail, busy, formData, copyText, reminderText, modal } from './core.js';
-import { cashForm, fineDetail } from './forms.js';
+import { S, get, post, put, del, esc, kr, krPlain, num, pct, fmtDate, fmtTs, monthName, seasonMonths, today, demoTag, placeBadge, icon, isAdmin, barChart, empty, confirmDialog, toast, fail, busy, formData, copyText, reminderText, modal, ROLE, juniorTag } from './core.js';
+import { cashForm, fineDetail, accountForm } from './forms.js';
 import { refresh, loadSettings } from './app.js';
 
 const kpi = (label, value, cls = '', sub = '') => `<div class="kpi ${cls}"><small>${label}</small><b>${value}</b>${sub ? `<span>${sub}</span>` : ''}</div>`;
@@ -36,7 +36,7 @@ export async function leaderboard(el) {
       ${d.most.length ? `<div class="tbl-wrap"><table class="tbl click lbt"><thead><tr><th>Plats</th><th>Spelare</th><th class="r">Antal</th><th class="r">Bötesbelopp</th><th class="r ${econ ? '' : 'hide-m'}">Obetald skuld</th></tr></thead><tbody>
         ${d.most.map((r) => `<tr data-id="${esc(r.id)}" class="${r.active ? '' : 'dim'}"><td>${econ ? `<span class="place pn">${r.place}</span>` : placeBadge(r.place)}</td><td><b>${esc(r.name)}</b> ${demoTag(r.is_demo)}${r.jersey ? ` <small class="muted">#${esc(r.jersey)}</small>` : ''}</td>
           <td class="r ${lq.sort === 'count' ? 'hl' : ''}">${r.count}</td><td class="r ${lq.sort === 'amount' ? 'hl' : ''}">${kr(r.amount)}</td><td class="r ${econ ? 'hl neg' : 'hide-m'}">${kr(r.debt)}</td></tr>`).join('')}</tbody></table></div>
-        <p class="muted small">Delade placeringar: spelare med samma värde får samma plats (1, 1, 3 …).</p>` : empty('Inga spelare.')}`;
+        <p class="muted small">Delade placeringar: spelare med samma värde får samma plats (1, 1, 3 …). Bötesbelopp = det spelaren ska betala (efter eventuell juniorrabatt).</p>` : empty('Inga spelare.')}`;
   } else if (lq.tab === 'pay') {
     const mini = (title, rows, val, note = '') => `<section class="card"><header><h2>${title}</h2></header>${note ? `<p class="muted small">${note}</p>` : ''}
       ${rows.length ? `<ol class="lb">${rows.slice(0, 10).map((r) => `<li><a href="#/spelare/${esc(r.id)}">${placeBadge(r.place)}<span class="nm"><span>${esc(r.name)}</span>${demoTag(r.is_demo)}</span><b>${val(r)}</b></a></li>`).join('')}</ol>` : empty('Ingen data för perioden.')}</section>`;
@@ -223,6 +223,7 @@ function startBalance(current) {
 
 // ---------- Inställningar ----------
 let setTab = 'general';
+export function setSettingsTab(t) { setTab = t; location.hash = '#/installningar'; }
 export async function settings(el) {
   const admin = isAdmin();
   if (!admin) setTab = 'account';
@@ -251,7 +252,10 @@ export async function settings(el) {
       <label class="field narrow-field"><span>Periodlängd (dagar)</span><input type="number" name="rule22_days" min="7" max="60" value="${esc(s.rule22_days)}"></label>
       <label class="switch"><input type="checkbox" name="rule23_enabled" ${s.rule23_enabled === '1' ? 'checked' : ''}><span></span><div><b>Regel 23 – minst böter efter säsong</b><small>Rangordning visas; administratören väljer manuellt vem som får boten.</small></div></label>
       <label class="switch"><input type="checkbox" name="rule29_enabled" ${s.rule29_enabled === '1' ? 'checked' : ''}><span></span><div><b>Regel 29 – förseningsbot</b><small>Visar vem som hade skuld efter månadens sista dag. Kräver godkännande, aldrig dubbla för samma period.</small></div></label>
-      <div class="actions"><button class="btn primary">Spara regler</button></div></form>`;
+      <div class="actions"><button class="btn primary">Spara regler</button></div></form>
+      <section class="card form-card"><h3>Juniorrabatt</h3><p class="muted small">50 % på alla nya böter för spelare med juniorrabatt. Slås på/av per spelare på spelarens sida. Rabatten är kopplad till spelaren – inte tröjnumret – och ändrar aldrig redan registrerade böter.</p>
+      <div data-juniors class="muted">Laddar…</div></section>`;
+    get('/api/players').then((ps) => { const j = ps.filter((p) => p.junior_discount); body.querySelector('[data-juniors]').innerHTML = j.length ? j.map((p) => `<a href="#/spelare/${esc(p.id)}">${p.jersey ? `#${esc(p.jersey)} ` : ''}${esc(p.name)}</a> ${juniorTag(p)}`).join('<br>') : 'Ingen spelare har juniorrabatt.'; });
     body.querySelector('[data-rules]').onsubmit = async (e) => {
       e.preventDefault(); const f = e.target;
       try { await put('/api/settings', { rule22_enabled: f.rule22_enabled.checked, rule23_enabled: f.rule23_enabled.checked, rule29_enabled: f.rule29_enabled.checked, rule22_days: Number(f.rule22_days.value) }); toast('Regler sparade.'); } catch (err) { fail(err); }
@@ -270,10 +274,20 @@ export async function settings(el) {
       try { await put(`/api/categories/${tr.dataset.cat}`, { name: tr.querySelector('[name=name]').value, default_amount: tr.querySelector('[name=amount]')?.value, active: tr.querySelector('[name=active]').checked }); toast('Kategorin sparad.'); tr.classList.toggle('dim', !tr.querySelector('[name=active]').checked); } catch (err) { fail(err); }
     };
   } else if (setTab === 'users') {
-    const users = await get('/api/users');
-    body.innerHTML = `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Användare</th><th>Roll</th><th>Status</th><th></th></tr></thead><tbody>
+    const [allUsers, players] = await Promise.all([get('/api/users'), get('/api/players')]);
+    const users = allUsers.filter((u) => u.role !== 'player');
+    const accounts = new Map(allUsers.filter((u) => u.role === 'player').map((u) => [u.player_id, u]));
+    const real = players.filter((p) => !p.is_demo).sort((a, b) => (Number(a.jersey) || 999) - (Number(b.jersey) || 999) || a.name.localeCompare(b.name, 'sv'));
+    body.innerHTML = `<section class="card"><header><h2>Spelarkonton</h2><span class="muted small">${accounts.size} av ${real.filter((p) => p.active).length} aktiva spelare har konto</span></header>
+      <p class="muted small">Spelare loggar in med sitt <b>tröjnummer</b> och ett eget lösenord. De kan läsa leaderboard och böteshistorik och anmäla böter – inte ändra böter, betalningar, saldon eller konton. Behörigheterna kontrolleras i servern.</p>
+      <div class="tbl-wrap"><table class="tbl"><thead><tr><th>#</th><th>Spelare</th><th>Konto</th><th></th></tr></thead><tbody>
+      ${real.map((p) => { const u = accounts.get(p.id); return `<tr class="${p.active ? '' : 'dim'}" ${u ? `data-uid="${u.id}"` : ''} data-pid="${esc(p.id)}"><td class="jersey">${esc(p.jersey || '–')}</td><td><b>${esc(p.name)}</b> ${juniorTag(p)}${p.active ? '' : ' <span class="pill grey">Inaktiv</span>'}</td>
+        <td>${u ? (u.active ? `<span class="pill green">Aktivt</span> <small class="muted">loggar in med ${esc(p.jersey)}</small>` : '<span class="pill grey">Avstängt</span>') : '<span class="muted small">Inget konto</span>'}</td>
+        <td class="r">${u ? `<button class="btn tiny ghost" data-pw>Nytt lösenord</button> <button class="btn tiny ghost" data-toggle>${u.active ? 'Stäng av' : 'Aktivera'}</button>` : p.active ? `<button class="btn tiny ghost" data-newacc ${p.jersey ? '' : 'disabled title="Lägg till tröjnummer först"'}>${icon('plus')} Skapa konto</button>` : ''}</td></tr>`; }).join('') || '<tr><td colspan="4" class="muted">Inga spelare ännu.</td></tr>'}</tbody></table></div></section>
+      <h3>Administratörer och läskonton</h3>
+      <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Användare</th><th>Roll</th><th>Status</th><th></th></tr></thead><tbody>
       ${users.map((u) => `<tr data-uid="${u.id}" class="${u.active ? '' : 'dim'}"><td><b>${esc(u.display_name)}</b><br><small class="muted">${esc(u.username)}</small></td>
-        <td><select data-role><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Administratör</option><option value="viewer" ${u.role === 'viewer' ? 'selected' : ''}>Läsbehörighet</option></select></td>
+        <td><select data-role><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>${ROLE.admin}</option><option value="viewer" ${u.role === 'viewer' ? 'selected' : ''}>${ROLE.viewer}</option></select></td>
         <td>${u.active ? '<span class="pill green">Aktiv</span>' : '<span class="pill grey">Avstängd</span>'}</td>
         <td class="r"><button class="btn tiny ghost" data-pw>Nytt lösenord</button> <button class="btn tiny ghost" data-toggle>${u.active ? 'Stäng av' : 'Aktivera'}</button></td></tr>`).join('')}</tbody></table></div>
       <form class="card form-card" data-new><h3>Ny användare</h3><div class="grid2">
@@ -281,19 +295,21 @@ export async function settings(el) {
         <label class="field"><span>Visningsnamn</span><input name="display_name" maxlength="60"></label>
         <label class="field"><span>Lösenord (minst 8 tecken)</span><input name="password" type="password" minlength="8" required autocomplete="new-password"></label>
         <label class="field"><span>Roll</span><select name="role"><option value="viewer">Läsbehörighet – ser statistik, kan inte ändra</option><option value="admin">Administratör – full behörighet</option></select></label></div>
-        <p class="muted small">Tips: skapa ett gemensamt läskonto för laget, t.ex. "laget", så kan alla följa leaderboarden.</p>
+        <p class="muted small">Spelare får hellre egna spelarkonton (ovan). Ett gemensamt läskonto, t.ex. "laget", fungerar också. Användarnamn får inte bara vara siffror.</p>
         <div class="actions"><button class="btn primary">Skapa användare</button></div></form>`;
     body.querySelector('[data-new]').onsubmit = async (e) => { e.preventDefault(); try { await post('/api/users', formData(e.target)); toast('Användaren skapad.'); settings(el); } catch (err) { fail(err); } };
     body.onchange = async (e) => { const sel = e.target.closest('[data-role]'); if (!sel) return; try { await put(`/api/users/${sel.closest('tr').dataset.uid}`, { role: sel.value }); toast('Roll ändrad.'); } catch (err) { fail(err); settings(el); } };
     body.onclick = async (e) => {
+      const na = e.target.closest('[data-newacc]');
+      if (na) { const p = real.find((x) => x.id === na.closest('tr').dataset.pid); return accountForm(p); }
       const tr = e.target.closest('tr[data-uid]'); if (!tr) return;
-      const u = users.find((x) => x.id === Number(tr.dataset.uid));
+      const u = allUsers.find((x) => x.id === Number(tr.dataset.uid));
       if (e.target.closest('[data-toggle]')) {
-        const ok = await confirmDialog({ title: u.active ? `Stäng av ${u.username}?` : `Aktivera ${u.username}?`, text: u.active ? 'Användaren loggas ut och kan inte logga in.' : 'Användaren kan logga in igen.', confirm: u.active ? 'Stäng av' : 'Aktivera', danger: !!u.active });
+        const ok = await confirmDialog({ title: u.active ? `Stäng av ${u.role === 'player' ? u.player_name : u.username}?` : `Aktivera ${u.role === 'player' ? u.player_name : u.username}?`, text: u.active ? 'Användaren loggas ut och kan inte logga in.' : 'Användaren kan logga in igen.', confirm: u.active ? 'Stäng av' : 'Aktivera', danger: !!u.active });
         if (!ok) return;
         try { await put(`/api/users/${u.id}`, { active: !u.active }); toast('Sparat.'); settings(el); } catch (err) { fail(err); }
       } else if (e.target.closest('[data-pw]')) {
-        const { el: m, close } = modal({ title: `Nytt lösenord för ${u.username}`, body: '<form><label class="field"><span>Nytt lösenord (minst 8 tecken)</span><input name="password" type="password" minlength="8" required autofocus autocomplete="new-password"></label><div class="actions"><button class="btn primary">Spara</button></div></form>' });
+        const { el: m, close } = modal({ title: `Nytt lösenord för ${u.role === 'player' ? `#${u.jersey} ${u.player_name}` : u.username}`, body: '<form><label class="field"><span>Nytt lösenord (minst 8 tecken)</span><input name="password" type="password" minlength="8" required autofocus autocomplete="new-password"></label><div class="actions"><button class="btn primary">Spara</button></div></form>' });
         m.querySelector('form').onsubmit = async (ev) => { ev.preventDefault(); try { await put(`/api/users/${u.id}`, { password: ev.target.password.value }); toast('Lösenordet ändrat.'); close(); } catch (err) { fail(err); } };
       }
     };
@@ -334,7 +350,7 @@ export async function settings(el) {
     };
     draw(); body.querySelector('[data-q]').oninput = (e) => draw(e.target.value);
   } else {
-    body.innerHTML = `<form class="card form-card" data-pw><h3>Byt lösenord</h3><p class="muted">Inloggad som <b>${esc(S.me.display_name)}</b> (${S.me.role === 'admin' ? 'administratör' : 'läsbehörighet'}).</p>
+    body.innerHTML = `<form class="card form-card" data-pw><h3>Byt lösenord</h3><p class="muted">Inloggad som <b>${S.me.jersey ? `#${esc(S.me.jersey)} ` : ''}${esc(S.me.display_name)}</b> (${ROLE[S.me.role].toLowerCase()}).${S.me.role === 'player' ? ' Du loggar in med ditt tröjnummer.' : ''}</p>
       <label class="field"><span>Nuvarande lösenord</span><input type="password" name="current" required autocomplete="current-password"></label>
       <label class="field"><span>Nytt lösenord (minst 8 tecken)</span><input type="password" name="password" minlength="8" required autocomplete="new-password"></label>
       <div class="actions"><button class="btn primary">Byt lösenord</button></div></form>`;

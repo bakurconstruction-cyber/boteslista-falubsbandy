@@ -365,6 +365,49 @@ fieldset.seg label { display: inline-flex; align-items: center; gap: 7px; cursor
 @keyframes fade { from { opacity: 0; } }
 @keyframes rise { from { opacity: 0; transform: translateY(10px); } }
 
+/* ---------- Anmälningar, juniorrabatt, spelarkonton ---------- */
+.side nav a { position: relative; }
+.nav-badge { margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--accent); color: #071226; font: 700 12px/20px var(--font); text-align: center; font-style: normal; }
+.bottom .has-badge { position: relative; }
+.bottom .nav-badge { position: absolute; top: 0; left: 55%; margin: 0; min-width: 17px; height: 17px; font-size: 10.5px; line-height: 17px; padding: 0 4px; }
+.pill.junior { background: var(--accent-bg); color: var(--accent2); margin-left: 6px; }
+.who .pill.junior { margin: 6px 0 0; }
+small.jr { display: inline-block; font-size: 10.5px; font-weight: 700; color: var(--accent2); text-transform: uppercase; letter-spacing: .04em; margin-left: 4px; }
+.feed .am small.jr { margin: 0; }
+.jr-note { margin: 6px 0 0; color: var(--accent2); display: flex; gap: 6px; align-items: flex-start; }
+.jr-note .ic { width: 16px; height: 16px; flex: none; margin-top: 2px; }
+.breakdown { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0 0 16px; }
+.breakdown > div { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 9px 12px; }
+.breakdown > div:last-child { border-color: var(--accent); background: var(--accent-bg); }
+.breakdown small { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
+.breakdown b { font: 700 21px var(--display); }
+.notice.warn-notice { background: var(--accent-bg); border-color: rgba(255,204,0,.35); }
+.notice.warn-notice > .ic { color: var(--accent); }
+.admin-box { padding: 6px 20px; }
+.admin-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; flex-wrap: wrap; }
+.admin-row + .admin-row { border-top: 1px solid var(--border); }
+.admin-row .switch { border: 0; padding: 0; flex: 1; min-width: 240px; }
+.acc { display: flex; gap: 12px; align-items: center; }
+.acc .ic { color: var(--accent2); }
+.acc div { display: flex; flex-direction: column; } .acc small { color: var(--muted); }
+.rep-list { display: grid; gap: 12px; }
+.rep { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--border2); border-radius: var(--r); padding: 14px 18px; }
+.rep-pending { border-left-color: var(--accent); }
+.rep-disputed { border-left-color: var(--neg); }
+.rep-approved { border-left-color: var(--pos); }
+.rep-rejected { opacity: .75; }
+.rep > header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.rep-no { font: 700 17px var(--display); letter-spacing: .03em; }
+.rep-date { margin-left: auto; }
+.rep-main { display: flex; justify-content: space-between; gap: 14px; }
+.rep-main p { margin: 4px 0 0; }
+.rep-who { font-weight: 700; font-size: 16px; color: var(--text); }
+.rep-who em { font-style: normal; font: 700 17px var(--display); color: var(--accent2); }
+.rep-comment { color: var(--text2); font-style: italic; }
+.rep-amt { font: 700 24px/1 var(--display); text-align: right; white-space: nowrap; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.rep-amt small { font: 500 11px var(--font); color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.rep .actions { margin-top: 10px; }
+
 /* ---------- Surfplatta ---------- */
 @media (max-width: 1180px) {
   .cols { grid-template-columns: 1fr 1fr; }
@@ -420,9 +463,14 @@ fieldset.seg label { display: inline-flex; align-items: center; gap: 7px; cursor
   .hbars li { grid-template-columns: 1fr auto; } .hbars .hb { grid-column: 1 / -1; grid-row: 2; }
   .cash-hero .big b { font-size: 44px; }
   .feed .no { display: none; }
+  .breakdown b { font-size: 18px; }
+  .rep { padding: 12px 14px; }
+  .rep-amt { font-size: 20px; }
+  .rep .actions .btn { flex: 1; }
   #toasts { right: 12px; left: 12px; top: calc(12px + env(safe-area-inset-top)); max-width: none; }
   .actions.sticky { bottom: -18px; }
   .actions.sticky .summary { flex: 1 1 100%; }
   .actions.sticky .btn { flex: 1; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+.tbl-wrap + .card, .tbl-wrap + form.card { margin-top: 18px; }

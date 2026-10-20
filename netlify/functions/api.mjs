@@ -15947,6 +15947,7 @@ var require_logic = __commonJS({
           allocated: 0,
           paid: 0,
           refunded: 0,
+          discounted: 0,
           unpaid_count: 0,
           overdue_count: 0,
           overdue_amount: 0,
@@ -15960,6 +15961,7 @@ var require_logic = __commonJS({
         p.fine_count++;
         p.issued += f.amount;
         p.allocated += f.paid;
+        p.discounted += f.discount_amount || 0;
         if (f.remaining > 0) p.unpaid_count++;
         if (f.overdue) {
           p.overdue_count++;
@@ -16038,10 +16040,10 @@ var require_logic = __commonJS({
       };
     }
     function slimPlayer(p) {
-      return { id: p.id, name: p.name, jersey: p.jersey, fine_count: p.fine_count, issued: p.issued, debt: p.debt, paid: p.paid, credit: p.credit, is_demo: p.is_demo, active: p.active };
+      return { id: p.id, name: p.name, jersey: p.jersey, fine_count: p.fine_count, issued: p.issued, debt: p.debt, paid: p.paid, credit: p.credit, is_demo: p.is_demo, active: p.active, junior_discount: p.junior_discount };
     }
     function slimFine(f) {
-      return { id: f.id, fine_no: f.fine_no, player_id: f.player_id, player_name: f.player_name, category_number: f.category_number, category_name: f.category_name, issued_date: f.issued_date, amount: f.amount, status: f.status, is_demo: f.is_demo };
+      return { id: f.id, fine_no: f.fine_no, player_id: f.player_id, player_name: f.player_name, category_number: f.category_number, category_name: f.category_name, issued_date: f.issued_date, amount: f.amount, base_amount: f.base_amount, discount_amount: f.discount_amount, discount_pct: f.discount_pct, status: f.status, is_demo: f.is_demo };
     }
     function slimPayment(p) {
       return { id: p.id, payment_no: p.payment_no, player_id: p.player_id, player_name: p.player_name, date: p.date, amount: p.amount, method: p.method, reversed: p.reversed, is_demo: p.is_demo };
@@ -16341,8 +16343,9 @@ var require_ops = __commonJS({
     var kr = (ore) => (ore / 100).toLocaleString("sv-SE", { minimumFractionDigits: ore % 100 ? 2 : 0, maximumFractionDigits: 2 }) + " kr";
     var now = () => (/* @__PURE__ */ new Date()).toISOString();
     var J = (o) => o == null ? null : JSON.stringify(o);
+    var who = (user) => user.label || user.username;
     async function audit(db, user, action, entity, entityId, oldV, newV, reason) {
-      await db.run("INSERT INTO audit_log (ts, username, action, entity, entity_id, old_value, new_value, reason) VALUES (?,?,?,?,?,?,?,?)", now(), user.username, action, entity, entityId == null ? null : String(entityId), J(oldV), J(newV), reason || null);
+      await db.run("INSERT INTO audit_log (ts, username, action, entity, entity_id, old_value, new_value, reason) VALUES (?,?,?,?,?,?,?,?)", now(), who(user), action, entity, entityId == null ? null : String(entityId), J(oldV), J(newV), reason || null);
     }
     async function getPlayer(db, id) {
       const p = await db.get("SELECT * FROM players WHERE id = ?", String(id || ""));
@@ -16383,14 +16386,16 @@ var require_ops = __commonJS({
       const p = playerInput(body);
       const n = await nextNumber(db, isDemo ? "demo_player" : "player");
       const id = (isDemo ? "X-S" : "S-") + String(n).padStart(3, "0");
-      await db.run("INSERT INTO players (id, first_name, last_name, jersey, position, notes, active, is_demo, created_at) VALUES (?,?,?,?,?,?,1,?,?)", id, p.first_name, p.last_name, p.jersey, p.position, p.notes, isDemo ? 1 : 0, body.created_at || now());
-      await audit(db, user, "Spelare skapad", "spelare", id, null, p);
+      const junior = body.junior_discount === true || body.junior_discount === "on" || Number(body.junior_discount) === 50 ? 50 : 0;
+      await db.run("INSERT INTO players (id, first_name, last_name, jersey, position, notes, active, is_demo, junior_discount, created_at) VALUES (?,?,?,?,?,?,1,?,?,?)", id, p.first_name, p.last_name, p.jersey, p.position, p.notes, isDemo ? 1 : 0, junior, body.created_at || now());
+      await audit(db, user, "Spelare skapad", "spelare", id, null, { ...p, ...junior ? { juniorrabatt: `${junior} %` } : {} });
       return id;
     }
     async function updatePlayer(db, user, id, body) {
       return tx(async (db2) => {
         const old = await getPlayer(db2, id);
         const p = playerInput(body);
+        if (p.jersey !== old.jersey) await assertJerseyFreeForLogin(db2, old.id, p.jersey);
         await db2.run("UPDATE players SET first_name=?, last_name=?, jersey=?, position=?, notes=? WHERE id=?", p.first_name, p.last_name, p.jersey, p.position, p.notes, old.id);
         await audit(
           db2,
@@ -16400,6 +16405,33 @@ var require_ops = __commonJS({
           old.id,
           { first_name: old.first_name, last_name: old.last_name, jersey: old.jersey, position: old.position, notes: old.notes },
           p
+        );
+      });
+    }
+    async function assertJerseyFreeForLogin(db, playerId, jersey) {
+      const hasAccount = await db.get("SELECT 1 AS x FROM users WHERE player_id = ?", playerId);
+      if (!hasAccount || !jersey) {
+        if (hasAccount && !jersey) fail("Spelaren har ett spelarkonto och loggar in med tr\xF6jnumret \u2013 tr\xF6jnumret kan inte tas bort. St\xE4ng av kontot f\xF6rst.");
+        return;
+      }
+      const clash = await db.get(`SELECT p.first_name, p.last_name FROM players p JOIN users u ON u.player_id = p.id
+    WHERE p.jersey = ? AND p.id <> ? AND p.is_demo = 0`, jersey, playerId);
+      if (clash) fail(`Tr\xF6jnummer ${jersey} anv\xE4nds redan f\xF6r inloggning av ${clash.first_name} ${clash.last_name}. Byt nummer p\xE5 den spelaren f\xF6rst.`, 409);
+    }
+    async function setJuniorDiscount(db, user, id, enabled) {
+      return tx(async (db2) => {
+        const p = await getPlayer(db2, id);
+        const pct = enabled ? 50 : 0;
+        if (p.junior_discount === pct) return;
+        await db2.run("UPDATE players SET junior_discount = ? WHERE id = ?", pct, p.id);
+        await audit(
+          db2,
+          user,
+          enabled ? "Juniorrabatt aktiverad" : "Juniorrabatt avst\xE4ngd",
+          "spelare",
+          p.id,
+          { juniorrabatt: `${p.junior_discount} %` },
+          { juniorrabatt: `${pct} %`, g\u00E4ller: "nya b\xF6ter \u2013 befintliga b\xF6ter \xE4ndras inte" }
         );
       });
     }
@@ -16492,7 +16524,7 @@ var require_ops = __commonJS({
       });
     }
     var RULE_KINDS = { no_fines: 22, least_fines: 23, late: 29 };
-    async function insertFine(db, user, season, input, { isDemo = false, ruleKey = null, allowRuleKind = false } = {}) {
+    async function insertFine(db, user, season, input, { isDemo = false, ruleKey = null, allowRuleKind = false, fixedAmount = null, reportId = null } = {}) {
       const player = await getPlayer(db, input.player_id);
       isDemo = isDemo || !!player.is_demo;
       if (!player.active && !isDemo) fail(`${player.first_name} ${player.last_name} \xE4r inaktiv. Aktivera spelaren f\xF6r att registrera nya b\xF6ter.`);
@@ -16526,9 +16558,12 @@ var require_ops = __commonJS({
         if (ref.voided) fail(`${no2} \xE4r makulerad och kan inte anv\xE4ndas som planterad bot.`);
         if (ref.is_demo && !isDemo) fail(`${no2} \xE4r exempeldata och kan inte anv\xE4ndas f\xF6r en riktig spelare.`);
         if (ref.kind === "planted") fail(`${no2} \xE4r sj\xE4lv en planterad bot. Ange den ursprungliga boten.`);
-        amount = ref.amount;
+        amount = ref.base_amount ?? ref.amount;
         refId = ref.id;
         calc = `Samma belopp som ${ref.fine_no} (${ref.category_name}): ${kr(amount)}`;
+      } else if (fixedAmount != null) {
+        amount = fixedAmount;
+        if (quantity > 1) calc = `${quantity} \xD7 ${kr(Math.round(amount / quantity))} = ${kr(amount)}`;
       } else {
         const standard = cat.default_amount * quantity;
         amount = input.amount != null && input.amount !== "" ? parseKr(input.amount) : standard;
@@ -16537,16 +16572,25 @@ var require_ops = __commonJS({
       }
       if (amount <= 0) fail("B\xF6tesbeloppet m\xE5ste vara st\xF6rre \xE4n 0 kr.");
       if (amount > MAX_AMOUNT) fail("B\xF6tesbeloppet \xE4r orimligt h\xF6gt.");
+      const d = discountFor(amount, player.junior_discount);
+      if (d.discount) calc = (calc ? calc + " \xB7 " : "") + `Juniorrabatt ${d.pct} %: ${kr(amount)} \u2212 ${kr(d.discount)} = ${kr(d.final)}`;
       const no = isDemo ? "X-" + String(await nextNumber(db, "demo_fine")).padStart(4, "0") : "B-" + String(await nextNumber(db, "fine")).padStart(4, "0");
       try {
         await db.run(`INSERT INTO fines (fine_no, season_id, player_id, category_id, category_name, category_number, kind, issued_date, due_date,
-      description, quantity, amount, ref_fine_id, rule_key, calc, registered_by, is_demo, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, no, season.id, player.id, cat.id, cat.name, cat.number, cat.kind, issued, due, description, quantity, amount, refId, ruleKey, calc, user.username, isDemo ? 1 : 0, now());
+      description, quantity, amount, base_amount, discount_amount, discount_pct, report_id, ref_fine_id, rule_key, calc, registered_by, is_demo, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, no, season.id, player.id, cat.id, cat.name, cat.number, cat.kind, issued, due, description, quantity, d.final, amount, d.discount, d.pct, reportId, refId, ruleKey, calc, who(user), isDemo ? 1 : 0, now());
       } catch (e) {
+        if (e.code === "23505" && reportId) fail("Anm\xE4lan har redan blivit en bot.", 409, "already_decided");
         if (e.code === "23505" && ruleKey) fail(`${player.first_name} ${player.last_name} har redan f\xE5tt bot nr ${cat.number} f\xF6r denna period.`, 409, "duplicate_rule");
         throw e;
       }
-      await audit(db, user, "Bot registrerad", "bot", no, null, { spelare: `${player.first_name} ${player.last_name}`, kategori: `${cat.number}. ${cat.name}`, belopp: kr(amount), datum: issued, f\u00F6rfaller: due, beskrivning: description, ber\u00E4kning: calc });
+      await audit(db, user, "Bot registrerad", "bot", no, null, { spelare: `${player.first_name} ${player.last_name}`, kategori: `${cat.number}. ${cat.name}`, belopp: kr(d.final), ...d.discount ? { ordinarie: kr(amount), juniorrabatt: kr(d.discount) } : {}, datum: issued, f\u00F6rfaller: due, beskrivning: description, ber\u00E4kning: calc });
       return no;
+    }
+    function discountFor(base, pct) {
+      pct = Number(pct) || 0;
+      if (pct <= 0) return { final: base, discount: 0, pct: 0 };
+      const discount = Math.floor(base * pct / 100);
+      return { final: base - discount, discount, pct };
     }
     async function createFines(db, user, season, items) {
       if (!Array.isArray(items) || !items.length) fail("Inga b\xF6ter att registrera.");
@@ -16567,7 +16611,9 @@ var require_ops = __commonJS({
         const due = date(body.due_date ?? f.due_date, "Sista betalningsdag");
         if (due < issued) fail("Sista betalningsdag kan inte vara f\xF6re utf\xE4rdandedatum.");
         const description = str(body.description ?? f.description, "Beskrivning", { max: 500 });
-        const amount = body.amount != null && body.amount !== "" ? parseKr(body.amount) : f.amount;
+        const base = body.amount != null && body.amount !== "" ? parseKr(body.amount) : f.base_amount ?? f.amount;
+        const d = f.discount_pct > 0 ? discountFor(base, f.discount_pct) : { final: base, discount: 0, pct: 0 };
+        const amount = d.final;
         const paid = await fineAllocated(db2, f.id);
         if (amount < paid) fail(`Beloppet kan inte s\xE4ttas l\xE4gre \xE4n det som redan betalats mot boten (${kr(paid)}). \xC5terf\xF6r eller flytta betalningen f\xF6rst.`);
         if (f.kind === "planted" && amount !== f.amount) fail("Beloppet f\xF6r en planterad bot h\xE4mtas fr\xE5n den ursprungliga boten och kan inte \xE4ndras.");
@@ -16580,7 +16626,12 @@ var require_ops = __commonJS({
           }
         }
         if (!Object.keys(changes).length) fail("Inga \xE4ndringar att spara.");
-        await db2.run("UPDATE fines SET issued_date=?, due_date=?, description=?, amount=? WHERE id=?", issued, due, description, amount, f.id);
+        if (d.discount && changes.amount) {
+          old.ordinarie = kr(f.base_amount ?? f.amount);
+          changes.ordinarie = kr(base);
+          changes.juniorrabatt = kr(d.discount);
+        }
+        await db2.run("UPDATE fines SET issued_date=?, due_date=?, description=?, amount=?, base_amount=?, discount_amount=? WHERE id=?", issued, due, description, amount, f.base_amount == null && !d.discount ? null : base, d.discount, f.id);
         await audit(db2, user, "Bot \xE4ndrad", "bot", f.fine_no, old, changes, reason);
       });
     }
@@ -16884,6 +16935,121 @@ var require_ops = __commonJS({
         return { removed_players: n };
       });
     }
+    var REPORT_KINDS = ["fixed", "per_item"];
+    async function getReport(db, id) {
+      const r = await db.get("SELECT * FROM fine_reports WHERE id = ?", Number(id));
+      if (!r) fail("Anm\xE4lan finns inte.", 404);
+      return r;
+    }
+    async function createReport(db, user, season, body) {
+      return tx(async (db2) => {
+        if (user.role !== "player" || !user.player_id) fail("Endast spelarkonton kan anm\xE4la b\xF6ter.", 403);
+        const reporter = await getPlayer(db2, user.player_id);
+        const target = await getPlayer(db2, body.player_id);
+        if (target.id === reporter.id) fail("Du kan inte anm\xE4la dig sj\xE4lv.");
+        if (target.is_demo) fail("Exempelspelare kan inte anm\xE4las.");
+        if (!target.active) fail(`${target.first_name} ${target.last_name} \xE4r inaktiv och kan inte anm\xE4las.`);
+        const cat = await db2.get("SELECT * FROM categories WHERE id = ?", Number(body.category_id));
+        if (!cat) fail("V\xE4lj en b\xF6teskategori.");
+        if (!cat.active) fail(`Kategorin "${cat.name}" \xE4r inaktiverad.`);
+        if (!REPORT_KINDS.includes(cat.kind)) fail(`Bot nr ${cat.number} kan inte anm\xE4las \u2013 den hanteras av administrat\xF6ren.`);
+        let quantity = 1;
+        if (cat.kind === "per_item") {
+          quantity = Number(body.quantity || 1);
+          if (!Number.isInteger(quantity) || quantity < 1 || quantity > 30) fail("Antal m\xE5ste vara ett heltal mellan 1 och 30.");
+        }
+        const incident = date(body.incident_date || L.todayStr(), "Datum f\xF6r h\xE4ndelsen");
+        notFuture(incident, "Datum f\xF6r h\xE4ndelsen");
+        inSeason(season, incident, "Datum f\xF6r h\xE4ndelsen");
+        const comment = str(body.comment, "Kommentar", { max: 300 });
+        const key = body.idempotency_key ? str(body.idempotency_key, "Nyckel", { max: 80 }) : null;
+        if (key) {
+          const ex = await db2.get("SELECT report_no FROM fine_reports WHERE idempotency_key = ?", key);
+          if (ex) fail(`Anm\xE4lan \xE4r redan skickad (${ex.report_no}).`, 409, "already_registered");
+        }
+        const dup = await db2.get(`SELECT report_no FROM fine_reports WHERE reporter_user_id = ? AND player_id = ? AND category_id = ?
+      AND incident_date = ? AND status IN ('pending','disputed')`, user.id, target.id, cat.id, incident);
+        if (dup) fail(`Du har redan en \xF6ppen anm\xE4lan av ${target.first_name} f\xF6r samma bot och dag (${dup.report_no}).`, 409, "duplicate_report");
+        const amount = cat.default_amount * quantity;
+        if (amount <= 0) fail("Kategorin saknar standardbelopp.");
+        const no = "A-" + String(await nextNumber(db2, "report")).padStart(4, "0");
+        const reporterName = `${reporter.first_name} ${reporter.last_name}`;
+        const r = await db2.get(
+          `INSERT INTO fine_reports (report_no, season_id, player_id, category_id, category_name, category_number, quantity, amount,
+      incident_date, comment, reporter_user_id, reporter_player_id, reporter_name, reporter_jersey, status, idempotency_key, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?) RETURNING *`,
+          no,
+          season.id,
+          target.id,
+          cat.id,
+          cat.name,
+          cat.number,
+          quantity,
+          amount,
+          incident,
+          comment,
+          user.id,
+          reporter.id,
+          reporterName,
+          reporter.jersey,
+          key,
+          now()
+        );
+        await audit(db2, user, "Bot anm\xE4ld", "anm\xE4lan", no, null, { anm\u00E4ld: `${target.first_name} ${target.last_name}`, kategori: `${cat.number}. ${cat.name}`, belopp: kr(amount), datum: incident, kommentar: comment, anm\u00E4lare: reporterName });
+        return r;
+      });
+    }
+    async function approveReport(db, user, season, id, { asPlayer = false, note = "" } = {}) {
+      return tx(async (db2) => {
+        const r = await getReport(db2, id);
+        if (asPlayer) {
+          if (user.player_id !== r.player_id) fail("Bara den anm\xE4lda spelaren kan godk\xE4nna sin anm\xE4lan.", 403);
+          if (r.status !== "pending") fail(r.status === "disputed" ? "Du har bestridit anm\xE4lan \u2013 administrat\xF6ren avg\xF6r den nu." : "Anm\xE4lan \xE4r redan avgjord.", 409, "already_decided");
+        } else if (!["pending", "disputed"].includes(r.status)) fail("Anm\xE4lan \xE4r redan avgjord.", 409, "already_decided");
+        if (r.fine_id) fail("Anm\xE4lan har redan blivit en bot.", 409, "already_decided");
+        const desc = `Anm\xE4lan ${r.report_no} av ${r.reporter_jersey ? `#${r.reporter_jersey} ` : ""}${r.reporter_name} (h\xE4ndelse ${r.incident_date})${r.comment ? `: ${r.comment}` : ""}`.slice(0, 500);
+        const fineNo = await insertFine(
+          db2,
+          user,
+          season,
+          { player_id: r.player_id, category_id: r.category_id, quantity: r.quantity, issued_date: L.todayStr(), description: desc },
+          { fixedAmount: r.amount, reportId: r.id }
+        );
+        const fine = await db2.get("SELECT id FROM fines WHERE fine_no = ?", fineNo);
+        const decisionNote = str(note, "Kommentar", { max: 300 });
+        const upd = await db2.run(
+          `UPDATE fine_reports SET status = 'approved', fine_id = ?, decided_by = ?, decided_at = ?, decision_note = ?, approved_by_player = ? WHERE id = ? AND status IN ('pending','disputed') AND fine_id IS NULL`,
+          fine.id,
+          who(user),
+          now(),
+          decisionNote || null,
+          asPlayer ? 1 : 0,
+          r.id
+        );
+        if (upd.changes !== 1) fail("Anm\xE4lan \xE4r redan avgjord.", 409, "already_decided");
+        await audit(db2, user, asPlayer ? "Anm\xE4lan godk\xE4nd av den anm\xE4lde" : "Anm\xE4lan godk\xE4nd", "anm\xE4lan", r.report_no, { status: r.status }, { status: "godk\xE4nd", bot: fineNo });
+        return { fine_no: fineNo };
+      });
+    }
+    async function disputeReport(db, user, id, body) {
+      return tx(async (db2) => {
+        const r = await getReport(db2, id);
+        if (user.player_id !== r.player_id) fail("Bara den anm\xE4lda spelaren kan bestrida sin anm\xE4lan.", 403);
+        if (r.status !== "pending") fail("Anm\xE4lan kan inte bestridas i nuvarande status.", 409, "already_decided");
+        const reason = str(body.reason, "Varf\xF6r du bestrider", { required: true, max: 300 });
+        await db2.run("UPDATE fine_reports SET status = 'disputed', dispute_reason = ?, disputed_at = ? WHERE id = ?", reason, now(), r.id);
+        await audit(db2, user, "Anm\xE4lan bestriden", "anm\xE4lan", r.report_no, { status: "v\xE4ntar" }, { status: "bestriden" }, reason);
+      });
+    }
+    async function rejectReport(db, user, id, body) {
+      return tx(async (db2) => {
+        const r = await getReport(db2, id);
+        if (!["pending", "disputed"].includes(r.status)) fail("Anm\xE4lan \xE4r redan avgjord.", 409, "already_decided");
+        const reason = str(body.reason, "Anledning", { required: true, max: 300 });
+        await db2.run("UPDATE fine_reports SET status = 'rejected', decided_by = ?, decided_at = ?, decision_note = ? WHERE id = ?", who(user), now(), reason, r.id);
+        await audit(db2, user, "Anm\xE4lan avslagen", "anm\xE4lan", r.report_no, { status: r.status }, { status: "avslagen" }, reason);
+      });
+    }
     module.exports = {
       AppError,
       fail,
@@ -16897,6 +17063,14 @@ var require_ops = __commonJS({
       deletePlayer,
       importPlayers,
       updateCategory,
+      setJuniorDiscount,
+      assertJerseyFreeForLogin,
+      createReport,
+      approveReport,
+      disputeReport,
+      rejectReport,
+      getPlayer,
+      who,
       createFines,
       editFine,
       voidFine,
@@ -16944,6 +17118,7 @@ var require_app = __commonJS({
     function validUsername(u) {
       const s = String(u || "").trim();
       if (!/^[a-zA-Z0-9._-]{3,30}$/.test(s)) O.fail("Anv\xE4ndarnamn: 3\u201330 tecken, bokst\xE4ver a\u2013z, siffror, punkt, bindestreck eller understreck.");
+      if (/^\d+$/.test(s)) O.fail("Anv\xE4ndarnamn f\xE5r inte bara vara siffror \u2013 siffror anv\xE4nds n\xE4r spelare loggar in med tr\xF6jnummer.");
       return s;
     }
     var krCsv = (ore) => (ore / 100).toFixed(2).replace(".", ",");
@@ -16979,10 +17154,22 @@ var require_app = __commonJS({
     var failures = /* @__PURE__ */ new Map();
     async function userFromToken(db, token) {
       if (!token) return null;
-      const row = await db.get("SELECT u.*, s.expires_at FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?", token);
+      const row = await db.get(`SELECT u.*, s.expires_at, p.first_name, p.last_name, p.jersey, p.active AS player_active
+    FROM sessions s JOIN users u ON u.id = s.user_id LEFT JOIN players p ON p.id = u.player_id WHERE s.token = ?`, token);
       if (!row || !row.active || row.expires_at < (/* @__PURE__ */ new Date()).toISOString()) return null;
-      return { id: row.id, username: row.username, display_name: row.display_name, role: row.role, token };
+      const user = { id: row.id, username: row.username, display_name: row.display_name, role: row.role, token };
+      if (row.role === "player") {
+        if (!row.player_id || !row.player_active) return null;
+        Object.assign(user, {
+          player_id: row.player_id,
+          jersey: row.jersey,
+          display_name: `${row.first_name} ${row.last_name}`,
+          label: `${row.jersey ? `#${row.jersey} ` : ""}${row.first_name} ${row.last_name}`
+        });
+      }
+      return user;
     }
+    var publicUser = (u) => u ? { username: u.username, display_name: u.display_name, role: u.role, player_id: u.player_id || null, jersey: u.jersey || null } : null;
     function readCookie(request) {
       const m = (request.headers.get("cookie") || "").split(";").map((s) => s.trim()).find((s) => s.startsWith(COOKIE + "="));
       return m ? decodeURIComponent(m.slice(COOKIE.length + 1)) : null;
@@ -17001,7 +17188,7 @@ var require_app = __commonJS({
     var state = async (db) => L.loadState(db, await season(db));
     GET("/api/status", "public", async ({ db, user }) => ({
       needs_setup: !await db.get("SELECT 1 AS x FROM users LIMIT 1"),
-      user: user ? { username: user.username, display_name: user.display_name, role: user.role } : null
+      user: publicUser(user)
     }));
     POST("/api/setup", "public", async ({ body, request }) => {
       validatePassword(body.password);
@@ -17028,7 +17215,9 @@ var require_app = __commonJS({
         f.t = Date.now();
       }
       if (f.n >= 10) O.fail("F\xF6r m\xE5nga misslyckade f\xF6rs\xF6k. V\xE4nta 15 minuter.", 429);
-      const u = await db.get("SELECT * FROM users WHERE lower(username) = lower(?)", String(body.username || "").trim());
+      const name = String(body.username || "").trim().replace(/^#/, "");
+      const u = /^\d{1,3}$/.test(name) ? await db.get(`SELECT u.* FROM users u JOIN players p ON p.id = u.player_id
+        WHERE u.role = 'player' AND p.jersey = ? AND p.is_demo = 0 AND p.active = 1`, name) : await db.get("SELECT * FROM users WHERE lower(username) = lower(?) AND role <> 'player'", name);
       if (!u || !u.active || !checkPassword(String(body.password || ""), u.password_hash)) {
         f.n++;
         failures.set(ip, f);
@@ -17052,10 +17241,10 @@ var require_app = __commonJS({
       });
       return { ok: true };
     });
-    GET("/api/dashboard", "auth", async ({ db }) => L.dashboard(await state(db), await L.getSettings(db)));
+    GET("/api/dashboard", "auth", async ({ db, user }) => ({ ...L.dashboard(await state(db), await L.getSettings(db)), reports: await reportTodo(db, user) }));
     GET("/api/categories", "auth", ({ db }) => db.all("SELECT * FROM categories ORDER BY number"));
     GET("/api/players", "auth", async ({ db }) => (await state(db)).players);
-    GET("/api/players/:id", "auth", async ({ db, params }) => {
+    GET("/api/players/:id", "auth", async ({ db, params, user }) => {
       const st = await state(db);
       const p = st.playerById.get(params.id);
       if (!p) O.fail("Spelaren finns inte.", 404);
@@ -17076,7 +17265,9 @@ var require_app = __commonJS({
         cats[f.category_name].amount += f.amount;
       }
       const lb = L.rank(st.players.filter((x) => x.active), (x) => x.issued);
-      return { player: p, fines, payments, refunds, history, categories: cats, place: lb.find((x) => x.id === p.id)?.place || null, of: lb.length };
+      const reports = (await reportsFor(db, user)).filter((r) => r.player_id === p.id);
+      const account = user.role === "admin" ? await db.get("SELECT id, active FROM users WHERE player_id = ?", p.id) : void 0;
+      return { player: p, fines, payments, refunds, history, categories: cats, place: lb.find((x) => x.id === p.id)?.place || null, of: lb.length, reports, account: account || null };
     });
     GET("/api/fines", "auth", async ({ db }) => (await state(db)).fines.sort((a, b) => b.id - a.id));
     GET("/api/fines/lookup", "auth", async ({ db, query }) => {
@@ -17093,7 +17284,8 @@ var require_app = __commonJS({
       const history = user.role === "admin" ? await db.all("SELECT * FROM audit_log WHERE entity = 'bot' AND entity_id = ? ORDER BY id DESC", f.fine_no) : [];
       const ref = f.ref_fine_id ? st.fineById.get(f.ref_fine_id) : null;
       const plantedBy = st.fines.filter((x) => x.ref_fine_id === f.id).map((x) => ({ fine_no: x.fine_no, player_name: x.player_name, voided: x.voided }));
-      return { fine: f, allocations: allocs, history, ref: ref ? { fine_no: ref.fine_no, player_name: ref.player_name } : null, planted_by: plantedBy };
+      const report = f.report_id ? await db.get("SELECT report_no, reporter_name, reporter_jersey, incident_date, comment, decided_by, approved_by_player, dispute_reason FROM fine_reports WHERE id = ?", f.report_id) : null;
+      return { fine: f, allocations: allocs, history, ref: ref ? { fine_no: ref.fine_no, player_name: ref.player_name } : null, planted_by: plantedBy, report };
     });
     GET("/api/payments", "auth", async ({ db }) => (await state(db)).payments.sort((a, b) => b.id - a.id));
     GET("/api/payments/:id", "auth", async ({ db, params }) => {
@@ -17176,7 +17368,69 @@ var require_app = __commonJS({
     POST("/api/demo", "admin", async ({ db, user }) => O.seedDemo(db, user, await season(db)));
     DEL("/api/demo", "admin", ({ db, user }) => O.removeDemo(db, user));
     GET("/api/audit", "admin", ({ db, query }) => db.all("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", Math.min(Number(query.get("limit")) || 300, 2e3)));
-    GET("/api/users", "admin", ({ db }) => db.all("SELECT id, username, display_name, role, active, created_at FROM users ORDER BY id"));
+    POST("/api/players/:id/junior-discount", "admin", async ({ db, user, params, body }) => {
+      await O.setJuniorDiscount(db, user, params.id, !!body.enabled);
+      return ok;
+    });
+    async function reportsFor(db, user) {
+      const s = await season(db);
+      const rows = await db.all(`SELECT r.*, p.first_name || ' ' || p.last_name AS player_name, p.jersey AS player_jersey, f.fine_no, f.amount AS fine_amount,
+    f.base_amount AS fine_base_amount, f.discount_amount AS fine_discount_amount, f.voided AS fine_voided, p.junior_discount
+    FROM fine_reports r JOIN players p ON p.id = r.player_id LEFT JOIN fines f ON f.id = r.fine_id WHERE r.season_id = ? ORDER BY r.id DESC`, s.id);
+      return user.role === "player" ? rows.filter((r) => r.player_id === user.player_id || r.reporter_user_id === user.id).map(({ idempotency_key, ...r }) => r) : rows.map(({ idempotency_key, ...r }) => r);
+    }
+    async function reportTodo(db, user) {
+      if (user.role === "admin") {
+        const r = await db.get("SELECT COUNT(*) FILTER (WHERE status = 'pending')::int pending, COUNT(*) FILTER (WHERE status = 'disputed')::int disputed FROM fine_reports");
+        return { pending: r.pending, disputed: r.disputed, todo: r.pending + r.disputed };
+      }
+      if (user.role === "player") {
+        const r = await db.get("SELECT COUNT(*)::int n FROM fine_reports WHERE player_id = ? AND status = 'pending'", user.player_id);
+        return { pending: r.n, disputed: 0, todo: r.n };
+      }
+      return { pending: 0, disputed: 0, todo: 0 };
+    }
+    GET("/api/reports", "auth", ({ db, user }) => reportsFor(db, user));
+    GET("/api/reports/todo", "auth", ({ db, user }) => reportTodo(db, user));
+    POST("/api/reports", "player", async ({ db, user, body }) => {
+      const r = await O.createReport(db, user, await season(db), body);
+      return { id: r.id, report_no: r.report_no };
+    });
+    POST("/api/reports/:id/accept", "player", ({ db, user, params }) => season(db).then((s) => O.approveReport(db, user, s, params.id, { asPlayer: true })));
+    POST("/api/reports/:id/dispute", "player", async ({ db, user, params, body }) => {
+      await O.disputeReport(db, user, params.id, body);
+      return ok;
+    });
+    POST("/api/reports/:id/approve", "admin", async ({ db, user, params, body }) => O.approveReport(db, user, await season(db), params.id, { note: body.note }));
+    POST("/api/reports/:id/reject", "admin", async ({ db, user, params, body }) => {
+      await O.rejectReport(db, user, params.id, body);
+      return ok;
+    });
+    POST("/api/players/:id/account", "admin", async ({ user, params, body }) => {
+      validatePassword(body.password);
+      return tx(async (t) => {
+        const p = await O.getPlayer(t, params.id);
+        if (p.is_demo) O.fail("Exempelspelare kan inte f\xE5 konto.");
+        if (!p.active) O.fail("Spelaren \xE4r inaktiv. Aktivera spelaren f\xF6rst.");
+        if (!p.jersey) O.fail("Spelaren m\xE5ste ha ett tr\xF6jnummer \u2013 det \xE4r anv\xE4ndarnamnet vid inloggning.");
+        if (await t.get("SELECT 1 AS x FROM users WHERE player_id = ?", p.id)) O.fail("Spelaren har redan ett konto. Byt l\xF6senord i st\xE4llet.", 409);
+        const clash = await t.get(`SELECT pl.first_name, pl.last_name FROM users u JOIN players pl ON pl.id = u.player_id WHERE pl.jersey = ? AND pl.is_demo = 0`, p.jersey);
+        if (clash) O.fail(`Tr\xF6jnummer ${p.jersey} anv\xE4nds redan f\xF6r inloggning av ${clash.first_name} ${clash.last_name}.`, 409);
+        const username = `spelare-${p.id.toLowerCase()}`;
+        const u = await t.get(
+          "INSERT INTO users (username, display_name, password_hash, role, player_id, created_at) VALUES (?,?,?,'player',?,?) RETURNING id",
+          username,
+          `${p.first_name} ${p.last_name}`,
+          hashPassword(body.password),
+          p.id,
+          (/* @__PURE__ */ new Date()).toISOString()
+        );
+        await O.audit(t, user, "Spelarkonto skapat", "anv\xE4ndare", `#${p.jersey} ${p.first_name} ${p.last_name}`, null, { spelare: p.id, inloggning: `tr\xF6jnummer ${p.jersey}` });
+        return { id: u.id, login: p.jersey };
+      });
+    });
+    GET("/api/users", "admin", ({ db }) => db.all(`SELECT u.id, u.username, u.display_name, u.role, u.active, u.created_at, u.player_id, p.jersey, p.active AS player_active,
+  p.first_name || ' ' || p.last_name AS player_name FROM users u LEFT JOIN players p ON p.id = u.player_id ORDER BY u.id`));
     POST("/api/users", "admin", async ({ user, body }) => {
       const username = validUsername(body.username);
       const role = body.role === "admin" ? "admin" : "viewer";
@@ -17194,6 +17448,7 @@ var require_app = __commonJS({
       await tx(async (t) => {
         const u = await t.get("SELECT * FROM users WHERE id = ?", Number(params.id));
         if (!u) O.fail("Anv\xE4ndaren finns inte.", 404);
+        if (body.role && u.role === "player") O.fail("Ett spelarkonto kan inte byta roll. Skapa ett separat konto f\xF6r administrat\xF6r eller l\xE4sbeh\xF6righet.");
         const role = body.role ? body.role === "admin" ? "admin" : "viewer" : u.role;
         const active = body.active == null ? u.active : body.active ? 1 : 0;
         const admins = (await t.get("SELECT COUNT(*)::int n FROM users WHERE role = 'admin' AND active = 1 AND id != ?", u.id)).n;
@@ -17208,16 +17463,23 @@ var require_app = __commonJS({
       });
       return ok;
     });
-    GET("/api/export/:name", "admin", async ({ db, params, query }) => {
+    GET("/api/export/:name", "admin", async ({ db, user, params, query }) => {
       const st = await state(db);
       const s = await L.getSettings(db);
       const name = params.name;
       const CSV = "text/csv; charset=utf-8";
       if (name === "boter.csv") {
         return file(csv(
-          ["B\xF6tesnummer", "Spelar-ID", "Spelare", "Datum", "Kategori nr", "Kategori", "Beskrivning", "Antal", "Belopp (kr)", "Betalt (kr)", "Kvar (kr)", "Status", "Sista betalningsdag", "Betaldatum", "F\xF6rsenad", "Ber\xE4kning", "Makuleringsorsak", "Registrerad av", "Exempeldata"],
-          [...st.fines].sort((a, b) => a.id - b.id).map((f) => [f.fine_no, f.player_id, f.player_name, f.issued_date, f.category_number, f.category_name, f.description, f.quantity, krCsv(f.amount), krCsv(f.paid), krCsv(f.remaining), STATUS_SV[f.status], f.due_date, f.paid_date || "", f.overdue ? "Ja" : "", f.calc || "", f.void_reason || "", f.registered_by, f.is_demo ? "Ja" : ""])
+          ["B\xF6tesnummer", "Spelar-ID", "Spelare", "Datum", "Kategori nr", "Kategori", "Beskrivning", "Antal", "Belopp (kr)", "Betalt (kr)", "Kvar (kr)", "Status", "Sista betalningsdag", "Betaldatum", "F\xF6rsenad", "Ber\xE4kning", "Makuleringsorsak", "Registrerad av", "Exempeldata", "Ordinarie belopp (kr)", "Juniorrabatt (kr)"],
+          [...st.fines].sort((a, b) => a.id - b.id).map((f) => [f.fine_no, f.player_id, f.player_name, f.issued_date, f.category_number, f.category_name, f.description, f.quantity, krCsv(f.amount), krCsv(f.paid), krCsv(f.remaining), STATUS_SV[f.status], f.due_date, f.paid_date || "", f.overdue ? "Ja" : "", f.calc || "", f.void_reason || "", f.registered_by, f.is_demo ? "Ja" : "", krCsv(f.base_amount ?? f.amount), f.discount_amount ? krCsv(f.discount_amount) : ""])
         ), "boter.csv", CSV);
+      }
+      if (name === "anmalningar.csv") {
+        const REP_SV = { pending: "V\xE4ntar p\xE5 godk\xE4nnande", disputed: "Bestriden", approved: "Godk\xE4nd", rejected: "Avslagen" };
+        return file(csv(
+          ["Anm\xE4lnings-ID", "Skickad", "Anm\xE4ld spelare", "Kategori nr", "Kategori", "Antal", "Standardbelopp (kr)", "H\xE4ndelsedatum", "Kommentar", "Anm\xE4lare", "Anm\xE4larens tr\xF6jnr", "Status", "Bestridd: orsak", "Avgjord av", "Avgjord", "Beslutskommentar", "B\xF6tesnummer"],
+          [...await reportsFor(db, user)].reverse().map((r) => [r.report_no, r.created_at, r.player_name, r.category_number, r.category_name, r.quantity, krCsv(r.amount), r.incident_date, r.comment, r.reporter_name, r.reporter_jersey || "", REP_SV[r.status], r.dispute_reason || "", r.decided_by || "", r.decided_at || "", r.decision_note || "", r.fine_no || ""])
+        ), name, CSV);
       }
       if (name === "inbetalningar.csv") {
         return file(csv(
@@ -17227,8 +17489,8 @@ var require_app = __commonJS({
       }
       if (name === "spelare.csv") {
         return file(csv(
-          ["Spelar-ID", "F\xF6rnamn", "Efternamn", "Tr\xF6jnummer", "Position", "Status", "Antal b\xF6ter", "Utf\xE4rdat (kr)", "Inbetalt (kr)", "Skuld (kr)", "Tillgodo (kr)", "Obetalda b\xF6ter", "Senaste inbetalning", "Anteckningar", "Exempeldata"],
-          st.players.map((p) => [p.id, p.first_name, p.last_name, p.jersey || "", p.position || "", p.active ? "Aktiv" : "Inaktiv", p.fine_count, krCsv(p.issued), krCsv(p.paid), krCsv(p.debt), krCsv(Math.max(0, p.credit)), p.unpaid_count, p.last_payment || "", p.notes, p.is_demo ? "Ja" : ""])
+          ["Spelar-ID", "F\xF6rnamn", "Efternamn", "Tr\xF6jnummer", "Position", "Status", "Antal b\xF6ter", "Utf\xE4rdat (kr)", "Inbetalt (kr)", "Skuld (kr)", "Tillgodo (kr)", "Obetalda b\xF6ter", "Senaste inbetalning", "Anteckningar", "Exempeldata", "Juniorrabatt"],
+          st.players.map((p) => [p.id, p.first_name, p.last_name, p.jersey || "", p.position || "", p.active ? "Aktiv" : "Inaktiv", p.fine_count, krCsv(p.issued), krCsv(p.paid), krCsv(p.debt), krCsv(Math.max(0, p.credit)), p.unpaid_count, p.last_payment || "", p.notes, p.is_demo ? "Ja" : "", p.junior_discount ? `${p.junior_discount} %` : ""])
         ), name, CSV);
       }
       if (name === "kassa.csv") {
@@ -17298,8 +17560,8 @@ var require_app = __commonJS({
       }
       if (name === "sakerhetskopia.json") {
         const dump = {};
-        for (const t of ["seasons", "settings", "counters", "players", "categories", "fines", "payments", "allocations", "cash_events", "month_closings", "audit_log"]) dump[t] = await db.all(`SELECT * FROM ${t} ORDER BY 1`);
-        dump.users = await db.all("SELECT id, username, display_name, role, active, created_at FROM users ORDER BY id");
+        for (const t of ["seasons", "settings", "counters", "players", "categories", "fines", "payments", "allocations", "cash_events", "month_closings", "audit_log", "fine_reports"]) dump[t] = await db.all(`SELECT * FROM ${t} ORDER BY 1`);
+        dump.users = await db.all("SELECT id, username, display_name, role, active, created_at, player_id FROM users ORDER BY id");
         return file(JSON.stringify({ app: "B\xF6teskassan 26/27", exported_at: (/* @__PURE__ */ new Date()).toISOString(), data: dump }, null, 2), `boteskassan-backup-${L.todayStr()}.json`, "application/json; charset=utf-8");
       }
       O.fail("Ok\xE4nd export.", 404);
@@ -17327,7 +17589,8 @@ var require_app = __commonJS({
         const db = getDb();
         const user = await userFromToken(db, readCookie(request));
         if (r.level !== "public" && !user) return json({ error: "Du m\xE5ste logga in." }, 401);
-        if (r.level === "admin" && user.role !== "admin") return json({ error: "Du har l\xE4sbeh\xF6righet och kan inte \xE4ndra uppgifter." }, 403);
+        if (r.level === "admin" && user.role !== "admin") return json({ error: user.role === "player" ? "Spelarkonton kan l\xE4sa och anm\xE4la b\xF6ter men inte \xE4ndra uppgifter." : "Du har l\xE4sbeh\xF6righet och kan inte \xE4ndra uppgifter." }, 403);
+        if (r.level === "player" && user.role !== "player") return json({ error: "Det h\xE4r kan bara g\xF6ras med ett spelarkonto." }, 403);
         let body = {};
         if (!["GET", "HEAD", "DELETE"].includes(method)) {
           const text = await request.text();
@@ -17368,7 +17631,7 @@ var { handle } = import_app.default;
 var api_default = async (request, context) => handle(request, { ip: context.ip || "" });
 export const config = { path: "/api/*" };
 export {
-    api_default as default
+  api_default as default
 };
 /*! Bundled license information:
 

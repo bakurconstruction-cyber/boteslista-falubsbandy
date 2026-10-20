@@ -94,14 +94,14 @@ async function loadState(db, season, today = todayStr()) {
   for (const p of players) {
     Object.assign(p, {
       name: `${p.first_name} ${p.last_name}`, fine_count: 0, issued: 0, allocated: 0, paid: 0,
-      refunded: 0, unpaid_count: 0, overdue_count: 0, overdue_amount: 0, last_payment: null,
+      refunded: 0, discounted: 0, unpaid_count: 0, overdue_count: 0, overdue_amount: 0, last_payment: null,
     });
   }
   for (const f of fines) {
     const p = playerById.get(f.player_id);
     f.player_name = p ? p.name : f.player_id;
     if (!p || f.voided) continue;
-    p.fine_count++; p.issued += f.amount; p.allocated += f.paid;
+    p.fine_count++; p.issued += f.amount; p.allocated += f.paid; p.discounted += f.discount_amount || 0;
     if (f.remaining > 0) p.unpaid_count++;
     if (f.overdue) { p.overdue_count++; p.overdue_amount += f.remaining; }
   }
@@ -173,10 +173,10 @@ function dashboard(st, settings) {
   };
 }
 function slimPlayer(p) {
-  return { id: p.id, name: p.name, jersey: p.jersey, fine_count: p.fine_count, issued: p.issued, debt: p.debt, paid: p.paid, credit: p.credit, is_demo: p.is_demo, active: p.active };
+  return { id: p.id, name: p.name, jersey: p.jersey, fine_count: p.fine_count, issued: p.issued, debt: p.debt, paid: p.paid, credit: p.credit, is_demo: p.is_demo, active: p.active, junior_discount: p.junior_discount };
 }
 function slimFine(f) {
-  return { id: f.id, fine_no: f.fine_no, player_id: f.player_id, player_name: f.player_name, category_number: f.category_number, category_name: f.category_name, issued_date: f.issued_date, amount: f.amount, status: f.status, is_demo: f.is_demo };
+  return { id: f.id, fine_no: f.fine_no, player_id: f.player_id, player_name: f.player_name, category_number: f.category_number, category_name: f.category_name, issued_date: f.issued_date, amount: f.amount, base_amount: f.base_amount, discount_amount: f.discount_amount, discount_pct: f.discount_pct, status: f.status, is_demo: f.is_demo };
 }
 function slimPayment(p) {
   return { id: p.id, payment_no: p.payment_no, player_id: p.player_id, player_name: p.player_name, date: p.date, amount: p.amount, method: p.method, reversed: p.reversed, is_demo: p.is_demo };

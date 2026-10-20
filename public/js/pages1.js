@@ -1,6 +1,6 @@
 // Sidor: Översikt, Spelare, Spelarprofil, Böter, Inbetalningar
-import { S, get, post, del, esc, kr, num, fmtDate, monthName, statusPill, demoTag, placeBadge, icon, isAdmin, barChart, empty, confirmDialog, toast, fail, copyText, reminderText, playerOpts } from './core.js';
-import { fineForm, paymentForm, playerForm, importForm, fineDetail, paymentDetail, cashForm } from './forms.js';
+import { S, get, post, del, esc, kr, num, fmtDate, monthName, statusPill, demoTag, placeBadge, icon, isAdmin, isPlayer, barChart, empty, confirmDialog, toast, fail, copyText, reminderText, playerOpts, fineAmt, juniorTag } from './core.js';
+import { fineForm, paymentForm, playerForm, importForm, fineDetail, paymentDetail, cashForm, reportForm, reportCard, decideReport, accountForm } from './forms.js';
 import { refresh } from './app.js';
 
 const kpi = (label, value, { cls = '', sub = '', href = '' } = {}) =>
@@ -13,7 +13,8 @@ export async function dashboard(el) {
   const admin = isAdmin();
   el.innerHTML = `
   <div class="page-h"><div><h1>Översikt</h1><p class="muted">Säsong ${esc(d.season.name)} · ${monthName(d.month)}</p></div>
-    ${admin ? `<div class="btns"><button class="btn primary" data-act="fine">${icon('plus')} Ny bot</button><button class="btn ghost" data-act="pay">${icon('coin')} Inbetalning</button></div>` : ''}</div>
+    ${admin ? `<div class="btns"><button class="btn primary" data-act="fine">${icon('plus')} Ny bot</button><button class="btn ghost" data-act="pay">${icon('coin')} Inbetalning</button></div>` : isPlayer() ? `<div class="btns"><button class="btn primary" data-act="report">${icon('flag')} Anmäl bot</button><a class="btn ghost" href="#/spelare/${esc(S.me.player_id)}">Min sida</a></div>` : ''}</div>
+  ${d.reports.todo ? `<div class="notice warn-notice">${icon('flag')}<div>${admin ? `<b>${d.reports.todo} ${d.reports.todo === 1 ? 'anmälan' : 'anmälningar'} att hantera</b>${d.reports.disputed ? ` – varav ${d.reports.disputed} bestridda` : ''}.` : `<b>Du har ${d.reports.todo} ${d.reports.todo === 1 ? 'anmälan' : 'anmälningar'} att svara på.</b> Godkänn eller bestrid.`}</div><a class="btn small primary" href="#/anmalningar">Visa</a></div>` : ''}
   ${!d.players_total && admin ? `<div class="notice">${icon('info')}<div><b>Kom igång:</b> lägg till lagets spelare under <a href="#/spelare">Spelare</a> (en i taget eller via CSV-import). Böteslistan 2026/2027 är redan inlagd.</div></div>` : ''}
   <section class="kpis">
     ${kpi('Utfärdade böter', kr(d.fines_amount), { sub: `${num(d.fines_count)} st${d.fines_voided ? ` · ${d.fines_voided} makulerade` : ''}`, href: '#/boter', cls: 'accent' })}
@@ -46,13 +47,13 @@ export async function dashboard(el) {
     <section class="card"><header><h2>Leaderboard</h2><a href="#/leaderboard" class="link">Alla →</a></header>
       ${d.leaderboard.length ? `<ol class="lb">${d.leaderboard.map((p) => `<li><a href="#/spelare/${esc(p.id)}">${placeBadge(p.place)}<span class="nm"><span>${esc(p.name)}</span>${demoTag(p.is_demo)}</span><span class="muted">${p.fine_count} st</span><b>${kr(p.issued)}</b></a></li>`).join('')}</ol>` : empty('Inga spelare ännu.')}</section>
     <section class="card"><header><h2>Senaste böter</h2><a href="#/boter" class="link">Register →</a></header>
-      ${d.recent_fines.length ? `<ul class="feed">${d.recent_fines.map((f) => `<li data-fine="${f.id}"><span class="no">${esc(f.fine_no)}</span><span class="tx"><b>${esc(f.player_name)}</b><small>${esc(f.category_name)} · ${fmtDate(f.issued_date)}</small></span><span class="am">${kr(f.amount)}${statusPill(f.status)}</span></li>`).join('')}</ul>` : empty('Inga böter registrerade ännu.')}</section>
+      ${d.recent_fines.length ? `<ul class="feed">${d.recent_fines.map((f) => `<li data-fine="${f.id}"><span class="no">${esc(f.fine_no)}</span><span class="tx"><b>${esc(f.player_name)}</b><small>${esc(f.category_name)} · ${fmtDate(f.issued_date)}</small></span><span class="am">${kr(f.amount)}${f.discount_amount ? '<small class="jr">junior</small>' : ''}${statusPill(f.status)}</span></li>`).join('')}</ul>` : empty('Inga böter registrerade ännu.')}</section>
     <section class="card"><header><h2>Senaste inbetalningar</h2><a href="#/betalningar" class="link">Alla →</a></header>
       ${d.recent_payments.length ? `<ul class="feed">${d.recent_payments.map((p) => `<li data-pay="${p.id}"><span class="no">${esc(p.payment_no)}</span><span class="tx"><b>${esc(p.player_name)}</b><small>${esc(p.method)} · ${fmtDate(p.date)}</small></span><span class="am ${p.reversed ? 'struck' : 'pos'}">${kr(p.amount)}</span></li>`).join('')}</ul>` : empty('Inga inbetalningar ännu.')}</section>
   </div>`;
   el.onclick = (e) => {
     const a = e.target.closest('[data-act],[data-fine],[data-pay]'); if (!a) return;
-    if (a.dataset.act === 'fine') fineForm(); else if (a.dataset.act === 'pay') paymentForm();
+    if (a.dataset.act === 'fine') fineForm(); else if (a.dataset.act === 'pay') paymentForm(); else if (a.dataset.act === 'report') reportForm();
     else if (a.dataset.fine) fineDetail(a.dataset.fine); else if (a.dataset.pay) paymentDetail(a.dataset.pay);
   };
 }
@@ -84,7 +85,7 @@ export async function players(el) {
       ? empty('Inga spelare ännu. Lägg till lagets spelare för att börja.', admin ? '<button class="btn primary" data-act="new">Lägg till första spelaren</button>' : '')
       : !rows.length ? empty('Inga spelare matchar filtret.')
       : `<div class="tbl-wrap"><table class="tbl click players-tbl"><thead><tr><th>#</th><th>Spelare</th><th class="hide-m">Position</th><th class="r">Böter</th><th class="r hide-m">Utfärdat</th><th class="r hide-m">Inbetalt</th><th class="r">Skuld</th><th class="r hide-m">Obetalda</th><th class="hide-m">Senaste inbetalning</th></tr></thead><tbody>
-        ${rows.map((p) => `<tr data-id="${esc(p.id)}" class="${p.active ? '' : 'dim'}"><td class="jersey">${esc(p.jersey || '')}</td><td><b>${esc(p.name)}</b> ${demoTag(p.is_demo)}${p.active ? '' : ' <span class="pill grey">Inaktiv</span>'}<br><small class="muted">${esc(p.id)}</small></td>
+        ${rows.map((p) => `<tr data-id="${esc(p.id)}" class="${p.active ? '' : 'dim'}"><td class="jersey">${esc(p.jersey || '')}</td><td><b>${esc(p.name)}</b> ${demoTag(p.is_demo)}${juniorTag(p)}${p.active ? '' : ' <span class="pill grey">Inaktiv</span>'}<br><small class="muted">${esc(p.id)}</small></td>
           <td class="hide-m">${esc(p.position || '')}</td><td class="r">${p.fine_count}</td><td class="r hide-m">${kr(p.issued)}</td><td class="r hide-m">${kr(p.paid)}</td>
           <td class="r"><b class="${p.debt ? 'neg' : ''}">${kr(p.debt)}</b>${p.credit > 0 ? `<br><small class="pos">+${kr(p.credit)} tillgodo</small>` : ''}${p.overdue_count ? `<br><small class="warn">${p.overdue_count} försenade</small>` : ''}</td>
           <td class="r hide-m">${p.unpaid_count}</td><td class="hide-m">${fmtDate(p.last_payment)}</td></tr>`).join('')}</tbody></table></div>`;
@@ -111,47 +112,64 @@ export async function profile(el, [id]) {
   <a href="#/spelare" class="back">← Spelare</a>
   <div class="profile-h">
     <div class="avatar">${esc(p.jersey || (p.first_name[0] + p.last_name[0]))}</div>
-    <div class="who"><h1>${esc(p.name)} ${demoTag(p.is_demo)}</h1>
+    <div class="who"><h1>${esc(p.name)} ${demoTag(p.is_demo)}</h1>${juniorTag(p)}
       <p class="muted">${esc(p.id)}${p.position ? ` · ${esc(p.position)}` : ''}${p.jersey ? ` · #${esc(p.jersey)}` : ''} · ${p.active ? '<span class="pill green">Aktiv</span>' : '<span class="pill grey">Inaktiv</span>'}${d.place ? ` · Plats ${d.place} av ${d.of} i leaderboard` : ''}</p></div>
     ${admin ? `<div class="btns">
       ${p.active ? `<button class="btn primary" data-act="fine">${icon('plus')} Bot</button>` : ''}
       <button class="btn ghost" data-act="pay">${icon('coin')} Inbetalning</button>
       <button class="btn ghost" data-act="edit">${icon('edit')} Redigera</button>
       <button class="btn ghost" data-act="toggle">${p.active ? 'Inaktivera' : 'Aktivera'}</button>
-      ${canDelete ? `<button class="btn ghost danger" data-act="delete">${icon('trash')} Ta bort</button>` : ''}</div>` : ''}
+      ${canDelete ? `<button class="btn ghost danger" data-act="delete">${icon('trash')} Ta bort</button>` : ''}</div>` : isPlayer() && p.active && p.id !== S.me.player_id && !p.is_demo ? `<div class="btns"><button class="btn primary" data-act="report">${icon('flag')} Anmäl bot</button></div>` : ''}
   </div>
+  ${admin && !p.is_demo ? `<section class="card admin-box"><div class="admin-row">
+      <label class="switch sm-row"><input type="checkbox" data-junior ${p.junior_discount ? 'checked' : ''}><span></span><div><b>Juniorrabatt 50 %</b><small>Dras på alla nya böter när de blir officiella. Ordinarie belopp i böteslistan ändras inte, och befintliga böter ändras inte. Kopplad till spelaren – inte till tröjnumret.</small></div></label>
+    </div><div class="admin-row">
+      <div class="acc">${icon('key')}<div><b>Spelarkonto</b><small>${d.account ? (d.account.active ? `Aktivt – loggar in med tröjnummer <b>${esc(p.jersey || '?')}</b>` : 'Avstängt') : 'Inget konto ännu'}</small></div></div>
+      ${d.account ? '<a class="btn small ghost" href="#/installningar" data-act="users">Hantera konton</a>' : `<button class="btn small ghost" data-act="account">${icon('plus')} Skapa konto</button>`}
+    </div></section>` : ''}
   <section class="kpis">
     ${kpi('Utfärdade böter', kr(p.issued), { sub: `${p.fine_count} st`, cls: 'accent' })}
     ${kpi('Totalt betalt', kr(p.paid), { cls: 'pos', sub: p.refunded ? `${kr(p.refunded)} återbetalt` : '' })}
     ${kpi('Återstående skuld', kr(p.debt), { cls: p.debt ? 'neg' : '', sub: `${p.unpaid_count} obetalda böter` })}
-    ${kpi('Tillgodohavande', kr(Math.max(0, p.credit)), { cls: p.credit > 0 ? 'pos' : '' })}
+    ${kpi('Tillgodohavande', kr(Math.max(0, p.credit)), { cls: p.credit > 0 ? 'pos' : '', sub: p.discounted ? `juniorrabatt hittills ${kr(p.discounted)}` : '' })}
     ${kpi('Förfallet', kr(p.overdue_amount), { cls: p.overdue_count ? 'warn' : '', sub: `${p.overdue_count} försenade` })}
     ${kpi('Senaste betalning', fmtDate(p.last_payment))}
   </section>
   ${admin && p.credit > 0 ? `<div class="notice ok">${icon('info')}<div>${esc(p.first_name)} har <b>${kr(p.credit)}</b> i tillgodohavande som inte är fördelat.</div><div class="btns">${p.debt ? '<button class="btn small primary" data-act="alloc">Fördela mot obetalda böter</button>' : ''}<button class="btn small ghost" data-act="refund">Återbetala</button></div></div>` : ''}
   ${p.debt && admin ? `<div class="notice">${icon('chat')}<div>Skicka en påminnelse manuellt via lagets chatt.</div><button class="btn small ghost" data-act="remind">Kopiera påminnelse</button></div>` : ''}
   ${p.notes ? `<div class="card notes"><small>Anteckningar</small><p>${esc(p.notes)}</p></div>` : ''}
-  <div class="tabs" role="tablist">${[['fines', `Böter (${d.fines.length})`], ['payments', `Betalningar (${d.payments.length})`], ['history', 'Historik'], ['stats', 'Statistik']].map(([k, l]) => `<button role="tab" class="${profileTab === k ? 'on' : ''}" data-tab="${k}">${l}</button>`).join('')}</div>
+  <div class="tabs" role="tablist">${[['fines', `Böter (${d.fines.length})`], ['reports', `Anmälningar (${d.reports.length})`], ['payments', `Betalningar (${d.payments.length})`], ['history', 'Historik'], ['stats', 'Statistik']].map(([k, l]) => `<button role="tab" class="${profileTab === k ? 'on' : ''}" data-tab="${k}">${l}</button>`).join('')}</div>
   <div data-tabbody></div>`;
   const bodies = {
     fines: () => (d.fines.length ? `<div class="tbl-wrap"><table class="tbl click"><thead><tr><th>Nr</th><th>Datum</th><th>Kategori</th><th class="r">Belopp</th><th class="r hide-m">Kvar</th><th>Status</th><th class="hide-m">Förfaller</th></tr></thead><tbody>
-      ${d.fines.map((f) => `<tr data-fine="${f.id}" class="${f.voided ? 'struck' : ''}"><td><b>${esc(f.fine_no)}</b></td><td>${fmtDate(f.issued_date)}</td><td>${esc(f.category_name)}${f.description ? `<br><small class="muted">${esc(f.description)}</small>` : ''}</td><td class="r">${kr(f.amount)}</td><td class="r hide-m">${kr(f.remaining)}</td><td>${statusPill(f.status)}</td><td class="hide-m ${f.overdue ? 'neg' : ''}">${fmtDate(f.due_date)}</td></tr>`).join('')}</tbody></table></div>` : empty('Inga böter – ännu.')),
+      ${d.fines.map((f) => `<tr data-fine="${f.id}" class="${f.voided ? 'struck' : ''}"><td><b>${esc(f.fine_no)}</b></td><td>${fmtDate(f.issued_date)}</td><td>${esc(f.category_name)}${f.description ? `<br><small class="muted">${esc(f.description)}</small>` : ''}</td><td class="r">${fineAmt(f)}</td><td class="r hide-m">${kr(f.remaining)}</td><td>${statusPill(f.status)}</td><td class="hide-m ${f.overdue ? 'neg' : ''}">${fmtDate(f.due_date)}</td></tr>`).join('')}</tbody></table></div>` : empty('Inga böter – ännu.')),
     payments: () => (d.payments.length || d.refunds.length ? `<div class="tbl-wrap"><table class="tbl click"><thead><tr><th>ID</th><th>Datum</th><th>Metod</th><th class="r">Belopp</th><th class="r hide-m">Fördelat</th><th>Status</th></tr></thead><tbody>
       ${d.payments.map((x) => `<tr data-pay="${x.id}" class="${x.reversed ? 'struck' : ''}"><td><b>${esc(x.payment_no)}</b></td><td>${fmtDate(x.date)}</td><td>${esc(x.method)}${x.reference ? `<br><small class="muted">${esc(x.reference)}</small>` : ''}</td><td class="r pos">${kr(x.amount)}</td><td class="r hide-m">${kr(x.allocated)}</td><td>${x.reversed ? '<span class="pill grey">Återförd</span>' : x.unallocated ? `<span class="pill ice">${kr(x.unallocated)} ofördelat</span>` : '<span class="pill green">Fördelad</span>'}</td></tr>`).join('')}
       ${d.refunds.map((c) => `<tr class="${c.voided ? 'struck' : ''}"><td><b>${esc(c.event_no)}</b></td><td>${fmtDate(c.date)}</td><td>Återbetalning</td><td class="r neg">−${kr(c.amount)}</td><td class="hide-m"></td><td>${c.voided ? '<span class="pill grey">Makulerad</span>' : '<span class="pill amber">Återbetald</span>'}</td></tr>`).join('')}</tbody></table></div>` : empty('Inga betalningar ännu.')),
+    reports: () => (d.reports.length ? `<p class="muted small">Anmälningar mot ${esc(p.first_name)}. Bara godkända anmälningar blir böter och räknas i skulden.</p><div class="rep-list">${d.reports.map(reportCard).join('')}</div>` : empty('Inga anmälningar.')),
     history: () => (d.history.length ? `<ul class="timeline">${d.history.map((h) => `<li class="t-${h.type}"><span class="dot"></span><div><b>${esc(h.text)}</b><small>${fmtDate(h.date)} · ${kr(h.amount)}</small></div></li>`).join('')}</ul>` : empty('Ingen historik.')),
     stats: () => (catRows.length ? `<div class="card"><h3>Böter per kategori</h3><ul class="hbars">${catRows.map(([n, v]) => `<li><span>${esc(n)}</span><div class="hb"><i style="width:${(v.amount / maxCat) * 100}%"></i></div><b>${v.count} st · ${kr(v.amount)}</b></li>`).join('')}</ul>
       <p class="muted small">Andel betald: ${p.issued ? Math.round((p.allocated / p.issued) * 100) : 0} % · Snittbot: ${p.fine_count ? kr(Math.round(p.issued / p.fine_count)) : '–'} · ${overdue.length} försenade</p></div>` : empty('Ingen statistik ännu.')),
   };
   const drawTab = () => { el.querySelector('[data-tabbody]').innerHTML = bodies[profileTab](); el.querySelectorAll('[data-tab]').forEach((b) => b.classList.toggle('on', b.dataset.tab === profileTab)); };
   drawTab();
+  el.querySelector('[data-junior]')?.addEventListener('change', async (e) => {
+    const on = e.target.checked;
+    const ok = await confirmDialog({ title: on ? `Aktivera juniorrabatt för ${p.name}?` : `Stäng av juniorrabatt för ${p.name}?`, text: on ? '50 % dras automatiskt på alla böter som blir officiella från och med nu. Befintliga böter ändras inte.' : 'Nya böter blir fullt pris. Befintliga böter med rabatt ändras inte.', confirm: on ? 'Aktivera' : 'Stäng av', danger: !on });
+    if (!ok) { e.target.checked = !on; return; }
+    try { await post(`/api/players/${encodeURIComponent(p.id)}/junior-discount`, { enabled: on }); toast(on ? 'Juniorrabatt aktiverad.' : 'Juniorrabatt avstängd.'); refresh(); } catch (err) { fail(err); e.target.checked = !on; }
+  });
   el.onclick = async (e) => {
     const t = e.target.closest('[data-tab]'); if (t) { profileTab = t.dataset.tab; return drawTab(); }
-    const fr = e.target.closest('[data-fine]'); if (fr) return fineDetail(fr.dataset.fine);
+    const fr = e.target.closest('[data-fine],[data-fineno]'); if (fr) { e.preventDefault(); return fineDetail(fr.dataset.fine || fr.dataset.fineno); }
+    const rb = e.target.closest('[data-rep]'); if (rb) { const r = d.reports.find((x) => x.id === Number(rb.dataset.rid)); return r && decideReport(r, rb.dataset.rep); }
     const pr = e.target.closest('[data-pay]'); if (pr) return paymentDetail(pr.dataset.pay);
     const a = e.target.closest('[data-act]'); if (!a) return;
     const act = a.dataset.act;
     if (act === 'fine') fineForm({ playerId: p.id });
+    else if (act === 'report') reportForm({ playerId: p.id });
+    else if (act === 'account') accountForm(p);
+    else if (act === 'users') { const { setSettingsTab } = await import('./pages2.js'); setSettingsTab('users'); }
     else if (act === 'pay') paymentForm({ playerId: p.id });
     else if (act === 'edit') playerForm(p);
     else if (act === 'refund') cashForm('refund', p.id);
@@ -210,7 +228,7 @@ export async function fines(el) {
       : `<div class="tbl-wrap"><table class="tbl click"><thead><tr><th>Nr</th><th>Datum</th><th>Spelare</th><th>Kategori</th><th class="r">Belopp</th><th>Status</th><th class="hide-m">Förfaller</th><th class="hide-m">Av</th></tr></thead><tbody>
         ${rows.slice(0, 500).map((f) => `<tr data-fine="${f.id}" class="${f.voided ? 'struck' : ''}"><td><b>${esc(f.fine_no)}</b> ${demoTag(f.is_demo)}</td><td>${fmtDate(f.issued_date)}</td><td>${esc(f.player_name)}</td>
           <td><span class="catno">${f.category_number}</span> ${esc(f.category_name)}${f.description ? `<br><small class="muted">${esc(f.description)}</small>` : ''}</td>
-          <td class="r"><b>${kr(f.amount)}</b>${f.status === 'delvis' ? `<br><small class="muted">kvar ${kr(f.remaining)}</small>` : ''}</td><td>${statusPill(f.status)}</td>
+          <td class="r"><b>${kr(f.amount)}</b>${f.discount_amount ? `<br><small class="muted">ord. ${kr(f.base_amount)} · junior −${kr(f.discount_amount)}</small>` : ''}${f.status === 'delvis' ? `<br><small class="muted">kvar ${kr(f.remaining)}</small>` : ''}</td><td>${statusPill(f.status)}</td>
           <td class="hide-m ${f.overdue ? 'neg' : ''}">${fmtDate(f.due_date)}${f.overdue ? ' ⚠' : ''}</td><td class="hide-m muted">${esc(f.registered_by)}</td></tr>`).join('')}</tbody></table>${rows.length > 500 ? '<p class="muted small">Visar 500 första – filtrera för fler.</p>' : ''}</div>`;
   }
   draw();

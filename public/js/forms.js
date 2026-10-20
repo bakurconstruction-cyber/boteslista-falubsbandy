@@ -1,5 +1,5 @@
 // Formulär och detaljvyer som används från flera sidor.
-import { S, get, post, put, esc, kr, krPlain, today, monthEnd, modal, confirmDialog, toast, fail, busy, formData, statusPill, demoTag, fmtDate, fmtTs, isAdmin, uid, playerOpts, icon } from './core.js';
+import { S, get, post, put, esc, kr, krPlain, today, monthEnd, modal, confirmDialog, toast, fail, busy, formData, statusPill, demoTag, fmtDate, fmtTs, isAdmin, uid, playerOpts, icon, juniorTag, reportPill } from './core.js';
 import { refresh } from './app.js';
 
 const RULE_KINDS = ['no_fines', 'least_fines', 'late'];
@@ -17,7 +17,7 @@ export async function fineForm({ playerId } = {}) {
     body: `<form class="fine-form" novalidate>
       <div class="step"><div class="step-h"><b>1</b> Spelare <small class="muted">– välj en eller flera</small></div>
         <input class="search" type="search" placeholder="Sök spelare…" data-psearch>
-        <div class="chips" data-players>${active.map((p) => `<button type="button" class="chip ${selected.has(p.id) ? 'on' : ''}" data-pid="${esc(p.id)}">${p.jersey ? `<em>${esc(p.jersey)}</em>` : ''}${esc(p.name)}${p.is_demo ? ' <small>(ex)</small>' : ''}</button>`).join('')}</div></div>
+        <div class="chips" data-players>${active.map((p) => `<button type="button" class="chip ${selected.has(p.id) ? 'on' : ''}" data-pid="${esc(p.id)}">${p.jersey ? `<em>${esc(p.jersey)}</em>` : ''}${esc(p.name)}${p.junior_discount ? ' <small class="jr">junior</small>' : ''}${p.is_demo ? ' <small>(ex)</small>' : ''}</button>`).join('')}</div></div>
       <div class="step"><div class="step-h"><b>2</b> Böteskategori</div>
         <input class="search" type="search" placeholder="Sök kategori eller nummer…" data-csearch>
         <div class="cat-grid" data-cats>${cats.map((c) => {
@@ -128,7 +128,10 @@ export async function fineForm({ playerId } = {}) {
       c.innerHTML = `<span class="warn">Beloppet avviker från standard (${kr(cat.default_amount * (Number(form.quantity?.value) || 1))}). Ändringen loggas.</span>`;
     } else c.innerHTML = '';
     if (!n || !cat) { s.textContent = !n ? 'Välj minst en spelare' : 'Välj en kategori'; return; }
-    s.innerHTML = a ? `${n} ${n === 1 ? 'bot' : 'böter'} × ${kr(a)} = <b>${kr(a * n)}</b>` : 'Komplettera uppgifterna';
+    const juniors = active.filter((p) => selected.has(p.id) && p.junior_discount);
+    if (juniors.length && a) c.innerHTML += `<p class="jr-note">${icon('star')} Juniorrabatt dras automatiskt: ${juniors.map((p) => `${esc(p.name)} betalar ${kr(a - Math.floor((a * p.junior_discount) / 100))} (ord. ${kr(a)} − ${kr(Math.floor((a * p.junior_discount) / 100))})`).join(', ')}.</p>`;
+    const total = a ? [...selected].reduce((sum, id) => { const p = active.find((x) => x.id === id); return sum + a - (p?.junior_discount ? Math.floor((a * p.junior_discount) / 100) : 0); }, 0) : 0;
+    s.innerHTML = a ? `${n} ${n === 1 ? 'bot' : 'böter'} × ${kr(a)}${juniors.length ? ' (minus juniorrabatt)' : ''} = <b>${kr(total)}</b>` : 'Komplettera uppgifterna';
   }
   async function submit(again, btn) {
     if (!selected.size) return toast('Välj minst en spelare.', 'err');
@@ -262,13 +265,17 @@ export function playerForm(p) {
       <label class="field"><span>Position</span><input name="position" maxlength="40" list="positions" value="${esc(p?.position)}"></label></div>
       <datalist id="positions"><option>Målvakt</option><option>Libero</option><option>Back</option><option>Halvback</option><option>Mittfält</option><option>Ytter</option><option>Anfallare</option><option>Tränare</option><option>Ledare</option></datalist>
       <label class="field"><span>Anteckningar</span><textarea name="notes" rows="3" maxlength="2000">${esc(p?.notes)}</textarea></label>
+      ${p ? '' : `<label class="switch"><input type="checkbox" name="junior_discount"><span></span><div><b>Juniorrabatt 50 %</b><small>Gäller spelaren (spelar-ID), inte tröjnumret. Kan ändras senare på spelarsidan.</small></div></label>`}
       <div class="actions"><button type="button" class="btn ghost" data-c>Avbryt</button>${p ? '' : '<button type="button" class="btn ghost" data-again>Spara & lägg till fler</button>'}<button class="btn primary">Spara</button></div></form>`,
   });
   const form = el.querySelector('form');
   el.querySelector('[data-c]').onclick = close;
+  // Förslag: nr 10 är junior. Administratören bekräftar själv genom att låta rutan vara ikryssad.
+  if (!p) form.jersey.addEventListener('input', () => { if (form.jersey.value.trim() === '10') form.junior_discount.checked = true; });
   const save = async (again, btn) => busy(btn, async () => {
     try {
       const d = formData(form);
+      if (!p) d.junior_discount = form.junior_discount.checked;
       if (p) await put(`/api/players/${encodeURIComponent(p.id)}`, d); else { const r = await post('/api/players', d); toast(`${d.first_name} ${d.last_name} tillagd (${r.id}).`); }
       if (p) toast('Spelaren sparad.');
       refresh();
@@ -309,7 +316,9 @@ export async function fineDetail(id) {
     title: `Bot ${f.fine_no}`, wide: true,
     body: `<div class="detail-head"><div><div class="big-no">${esc(f.fine_no)} ${demoTag(f.is_demo)}</div><a href="#/spelare/${esc(f.player_id)}" data-c>${esc(f.player_name)}</a></div>
       <div class="r"><div class="big-amt">${kr(f.amount)}</div>${statusPill(f.status)}</div></div>
+      ${f.discount_amount > 0 ? `<div class="breakdown"><div><small>Ordinarie bot</small><b>${kr(f.base_amount)}</b></div><div><small>Juniorrabatt ${f.discount_pct} %</small><b class="pos">−${kr(f.discount_amount)}</b></div><div><small>Att betala</small><b>${kr(f.amount)}</b></div></div>` : ''}
       <dl class="dl">
+        ${d.report ? `<dt>Från anmälan</dt><dd><b>${esc(d.report.report_no)}</b> av ${d.report.reporter_jersey ? `#${esc(d.report.reporter_jersey)} ` : ''}${esc(d.report.reporter_name)} · händelse ${fmtDate(d.report.incident_date)}${d.report.comment ? `<br><small class="muted">"${esc(d.report.comment)}"</small>` : ''}<br><small class="muted">Godkänd ${d.report.approved_by_player ? 'av den anmälde själv' : `av ${esc(d.report.decided_by)}`}${d.report.dispute_reason ? ` efter bestridande: ${esc(d.report.dispute_reason)}` : ''}</small></dd>` : ''}
         <dt>Kategori</dt><dd>${f.category_number}. ${esc(f.category_name)}${f.quantity > 1 ? ` (${f.quantity} st)` : ''}</dd>
         <dt>Utfärdad</dt><dd>${fmtDate(f.issued_date)}</dd>
         <dt>Sista betalningsdag</dt><dd class="${f.overdue ? 'neg' : ''}">${fmtDate(f.due_date)}${f.overdue ? ' – försenad' : ''}</dd>
@@ -343,7 +352,7 @@ function editFine(f) {
     body: `<form novalidate><div class="grid2">
       <label class="field"><span>Datum</span><input type="date" name="issued_date" value="${f.issued_date}" required></label>
       <label class="field"><span>Sista betalningsdag</span><input type="date" name="due_date" value="${f.due_date}" required></label>
-      <label class="field"><span>Belopp (kr)</span><input name="amount" inputmode="decimal" value="${krPlain(f.amount)}" ${f.kind === 'planted' ? 'disabled' : ''}></label>
+      <label class="field"><span>${f.discount_pct > 0 ? `Ordinarie belopp (kr) – juniorrabatt ${f.discount_pct} % dras` : 'Belopp (kr)'}</span><input name="amount" inputmode="decimal" value="${krPlain(f.base_amount ?? f.amount)}" ${f.kind === 'planted' ? 'disabled' : ''}></label>
       <label class="field"><span>Beskrivning</span><input name="description" value="${esc(f.description)}" maxlength="500"></label></div>
       <label class="field"><span>Anledning till ändringen (obligatorisk)</span><input name="reason" required maxlength="300" autofocus></label>
       <p class="muted small">Spelare och kategori kan inte ändras. Är de fel: makulera boten och registrera en ny.</p>
@@ -413,6 +422,139 @@ export async function cashForm(type, playerId) {
     e.preventDefault();
     await busy(form.querySelector('.primary'), async () => {
       try { const r = await post('/api/cash', { ...formData(form), type }); toast(`${r.event_no} registrerad.`); close(); refresh(); } catch (err) { fail(err); }
+    });
+  };
+}
+
+// ---------- Bötesanmälan (spelarkonto) ----------
+const REPORTABLE = ['fixed', 'per_item'];
+export async function reportForm({ playerId } = {}) {
+  const [players, cats] = await Promise.all([get('/api/players'), categories()]);
+  const others = players.filter((p) => p.active && !p.is_demo && p.id !== S.me.player_id);
+  if (!others.length) return toast('Det finns inga andra aktiva spelare att anmäla.', 'err');
+  const list = cats.filter((c) => c.active && REPORTABLE.includes(c.kind));
+  const key = uid(); const t = today();
+  const { el, close } = modal({
+    title: 'Anmäl bot', wide: true,
+    body: `<form novalidate>
+      <p class="muted small">Anmälan skickas som <b>${S.me.jersey ? `#${esc(S.me.jersey)} ` : ''}${esc(S.me.display_name)}</b>. Den blir en bot först när den anmälde eller administratören godkänner den.</p>
+      <div class="step"><div class="step-h"><b>1</b> Vem?</div>
+        <input class="search" type="search" placeholder="Sök spelare eller nummer…" data-psearch>
+        <div class="chips" data-players>${others.map((p) => `<button type="button" class="chip ${p.id === playerId ? 'on' : ''}" data-pid="${esc(p.id)}">${p.jersey ? `<em>${esc(p.jersey)}</em>` : ''}${esc(p.name)}</button>`).join('')}</div></div>
+      <div class="step"><div class="step-h"><b>2</b> Vilken bot?</div>
+        <input class="search" type="search" placeholder="Sök i böteslistan…" data-csearch>
+        <div class="cat-grid" data-cats>${list.map((c) => `<button type="button" class="cat" data-cid="${c.id}"><span class="n">${c.number}</span><span class="t">${esc(c.name)}</span><span class="a">${kr(c.default_amount)}${c.kind === 'per_item' ? '/st' : ''}</span></button>`).join('')}</div>
+        <p class="muted small">Särskilda böter (klubba, planterad bot, regel 22, 23 och 29) hanteras av administratören.</p></div>
+      <div class="step"><div class="step-h"><b>3</b> Detaljer</div>
+        <div class="grid3">
+          <label class="field"><span>När hände det?</span><input type="date" name="incident_date" value="${t}" max="${t}" required></label>
+          <label class="field" data-qty hidden><span>Antal</span><input type="number" name="quantity" min="1" max="30" value="1"></label>
+          <label class="field"><span>Kommentar (valfri)</span><input name="comment" maxlength="300" placeholder="Vad hände?"></label>
+        </div></div>
+      <div class="actions sticky"><span class="summary" data-summary>Välj spelare och bot</span><button type="button" class="btn ghost" data-c>Avbryt</button><button class="btn primary">${icon('flag')} Skicka anmälan</button></div>
+    </form>`,
+  });
+  const form = el.querySelector('form');
+  let pid = playerId || null; let cat = null;
+  const summary = () => {
+    const s = el.querySelector('[data-summary]');
+    const p = others.find((x) => x.id === pid);
+    if (!p || !cat) { s.textContent = !p ? 'Välj vem du anmäler' : 'Välj bot'; return; }
+    const q = cat.kind === 'per_item' ? Math.max(1, Number(form.quantity.value) || 1) : 1;
+    s.innerHTML = `${esc(p.name)} · ${cat.number}. ${esc(cat.name)} · <b>${kr(cat.default_amount * q)}</b>`;
+  };
+  el.querySelector('[data-c]').onclick = close;
+  el.querySelector('[data-players]').onclick = (e) => {
+    const b = e.target.closest('[data-pid]'); if (!b) return;
+    pid = b.dataset.pid; el.querySelectorAll('[data-pid]').forEach((x) => x.classList.toggle('on', x === b)); summary();
+  };
+  el.querySelector('[data-cats]').onclick = (e) => {
+    const b = e.target.closest('[data-cid]'); if (!b) return;
+    cat = list.find((c) => c.id === Number(b.dataset.cid));
+    el.querySelectorAll('[data-cid]').forEach((x) => x.classList.toggle('on', x === b));
+    el.querySelector('[data-qty]').hidden = cat.kind !== 'per_item'; summary();
+  };
+  const filter = (sel, item) => (e) => { const q = e.target.value.toLowerCase().trim(); el.querySelectorAll(item).forEach((b) => { b.hidden = q && !b.textContent.toLowerCase().includes(q); }); };
+  el.querySelector('[data-psearch]').oninput = filter('[data-players]', '[data-pid]');
+  el.querySelector('[data-csearch]').oninput = filter('[data-cats]', '[data-cid]');
+  form.quantity.oninput = summary;
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    if (!pid) return toast('Välj vem du anmäler.', 'err');
+    if (!cat) return toast('Välj vilken bot.', 'err');
+    const d = formData(form);
+    await busy(form.querySelector('.primary'), async () => {
+      try {
+        const r = await post('/api/reports', { player_id: pid, category_id: cat.id, quantity: cat.kind === 'per_item' ? Number(d.quantity) || 1 : 1, incident_date: d.incident_date, comment: d.comment, idempotency_key: key });
+        toast(`Anmälan ${r.report_no} skickad. Den väntar nu på godkännande.`);
+        close(); refresh();
+      } catch (err) { fail(err); }
+    });
+  };
+  summary();
+}
+
+// Beslut om en anmälan. kind: accept | dispute | approve | reject
+export async function decideReport(r, kind) {
+  const amountTxt = `${r.category_number}. ${esc(r.category_name)} – ${kr(r.amount)}`;
+  const jr = r.junior_discount ? ` Juniorrabatt ${r.junior_discount} % dras när boten blir officiell.` : '';
+  try {
+    if (kind === 'accept') {
+      const ok = await confirmDialog({ title: `Godkänn ${r.report_no}?`, text: `Du godkänner boten ${amountTxt}. Den blir en officiell bot med eget bötesnummer och läggs till din skuld.${jr}`, confirm: 'Godkänn boten', danger: false });
+      if (!ok) return;
+      const x = await post(`/api/reports/${r.id}/accept`); toast(`Godkänd – ${x.fine_no} registrerad.`);
+    } else if (kind === 'dispute') {
+      const reason = await confirmDialog({ title: `Bestrid ${r.report_no}?`, text: `Anmälan (${amountTxt}) skickas till administratören som avgör. Den påverkar inte din skuld så länge den inte är godkänd.`, confirm: 'Bestrid', reason: true, reasonLabel: 'Varför bestrider du? (obligatoriskt)' });
+      if (!reason) return;
+      await post(`/api/reports/${r.id}/dispute`, { reason }); toast('Anmälan bestriden – administratören avgör.');
+    } else if (kind === 'approve') {
+      const ok = await confirmDialog({ title: `Godkänn ${r.report_no}?`, text: `${esc(r.player_name)} får boten ${amountTxt}. Den blir en officiell bot med eget bötesnummer.${jr}`, confirm: 'Godkänn', danger: false });
+      if (!ok) return;
+      const x = await post(`/api/reports/${r.id}/approve`); toast(`Godkänd – ${x.fine_no} registrerad.`);
+    } else if (kind === 'reject') {
+      const reason = await confirmDialog({ title: `Avslå ${r.report_no}?`, text: 'Anmälan avslås och blir ingen bot. Den finns kvar i historiken.', confirm: 'Avslå', reason: true });
+      if (!reason) return;
+      await post(`/api/reports/${r.id}/reject`, { reason }); toast('Anmälan avslagen.');
+    }
+    refresh();
+  } catch (err) { fail(err); refresh(); }
+}
+
+// Kort för en anmälan (används på sidan Anmälningar och på spelarprofilen)
+export function reportCard(r) {
+  const me = S.me; const admin = isAdmin();
+  const mine = me.role === 'player' && r.player_id === me.player_id;
+  const actions = [];
+  if (mine && r.status === 'pending') actions.push(`<button class="btn small ghost" data-rep="dispute" data-rid="${r.id}">Bestrid</button><button class="btn small primary" data-rep="accept" data-rid="${r.id}">${icon('check')} Godkänn</button>`);
+  if (admin && ['pending', 'disputed'].includes(r.status)) actions.push(`<button class="btn small danger ghost" data-rep="reject" data-rid="${r.id}">Avslå</button><button class="btn small primary" data-rep="approve" data-rid="${r.id}">${icon('check')} Godkänn</button>`);
+  return `<article class="rep rep-${r.status}">
+    <header><span class="rep-no">${esc(r.report_no)}</span>${reportPill(r.status)}<span class="rep-date muted small">${fmtTs(r.created_at)}</span></header>
+    <div class="rep-main"><div><a href="#/spelare/${esc(r.player_id)}" class="rep-who">${r.player_jersey ? `<em>#${esc(r.player_jersey)}</em> ` : ''}${esc(r.player_name)}</a>${juniorTag(r)}
+      <p><span class="catno">${r.category_number}</span> ${esc(r.category_name)}${r.quantity > 1 ? ` × ${r.quantity}` : ''} · händelse ${fmtDate(r.incident_date)}</p>
+      ${r.comment ? `<p class="rep-comment">"${esc(r.comment)}"</p>` : ''}
+      <p class="muted small">Anmäld av <b>${r.reporter_jersey ? `#${esc(r.reporter_jersey)} ` : ''}${esc(r.reporter_name)}</b></p>
+      ${r.dispute_reason ? `<p class="small"><b class="neg">Bestriden:</b> ${esc(r.dispute_reason)}</p>` : ''}
+      ${r.status === 'approved' ? `<p class="small">Blev <a href="#" data-fineno="${r.fine_id}">${esc(r.fine_no)}</a>${r.fine_discount_amount ? ` · ord. ${kr(r.fine_base_amount)} − junior ${kr(r.fine_discount_amount)} = <b>${kr(r.fine_amount)}</b>` : ''} · godkänd ${r.approved_by_player ? 'av den anmälde' : `av ${esc(r.decided_by)}`}${r.fine_voided ? ' <span class="pill grey">makulerad</span>' : ''}</p>` : ''}
+      ${r.status === 'rejected' ? `<p class="small muted">Avslagen av ${esc(r.decided_by)}: ${esc(r.decision_note)}</p>` : ''}</div>
+      <div class="rep-amt">${kr(r.amount)}<small>standardbelopp</small>${r.junior_discount && ['pending', 'disputed'].includes(r.status) ? `<small class="jr">att betala ${kr(r.amount - Math.floor((r.amount * r.junior_discount) / 100))}</small>` : ''}</div></div>
+    ${actions.length ? `<div class="actions">${actions.join('')}</div>` : ''}
+  </article>`;
+}
+
+// ---------- Spelarkonto (administratör) ----------
+export function accountForm(p) {
+  const { el, close } = modal({
+    title: `Spelarkonto för ${p.name}`,
+    body: `<form novalidate><p class="lead">${p.jersey ? `${esc(p.first_name)} loggar in med tröjnummer <b>${esc(p.jersey)}</b> och lösenordet du anger nu.` : '<span class="neg">Spelaren saknar tröjnummer – lägg till det först.</span>'}</p>
+      <label class="field"><span>Lösenord (minst 8 tecken)</span><input name="password" type="password" minlength="8" required autofocus autocomplete="new-password"></label>
+      <p class="muted small">Spelarkontot kan läsa leaderboard och böteshistorik och anmäla böter – inte ändra böter, betalningar eller saldon. Be spelaren byta lösenord under Inställningar → Mitt konto.</p>
+      <div class="actions"><button type="button" class="btn ghost" data-c>Avbryt</button><button class="btn primary" ${p.jersey ? '' : 'disabled'}>Skapa konto</button></div></form>`,
+  });
+  el.querySelector('[data-c]').onclick = close;
+  el.querySelector('form').onsubmit = async (e) => {
+    e.preventDefault();
+    await busy(e.target.querySelector('.primary'), async () => {
+      try { const r = await post(`/api/players/${encodeURIComponent(p.id)}/account`, formData(e.target)); toast(`Konto skapat – inloggning med nummer ${r.login}.`); close(); refresh(); } catch (err) { fail(err); }
     });
   };
 }
