@@ -1,0 +1,22 @@
+{
+  "name": "boteskassan-26-27",
+  "version": "1.0.0",
+  "description": "Böteskassan 26/27 – webbapp för ett bandylags böteskassa",
+  "main": "server/app.js",
+  "scripts": {
+    "start": "node server/local.js",
+    "test": "node --test test/flows.test.js"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@netlify/database": "^2.0.1",
+    "pg": "^8.23.1"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=20.12"
+  },
+  "devDependencies": {
+    "@netlify/database-dev": "^1.0.1"
+  }
+}
