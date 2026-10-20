@@ -43,7 +43,7 @@ async function route(keepScroll = false) {
     if (my !== rendering) return;
     main.replaceChildren(holder);
     if (keepScroll) window.scrollTo(0, y); else window.scrollTo(0, 0);
-    document.title = `${NAV.find((n) => n[0] === base)?.[1] || 'Spelare'} · Böteskassan 26/27`;
+    document.title = `${NAV.find((n) => n[0] === base)?.[1] || 'Spelare'} · Böteskassan · Falu BS Bandy`;
   } catch (e) {
     if (e.status === 401) return;
     main.innerHTML = `<div class="empty">${icon('alert')}<p>${esc(e.message)}</p><a class="btn ghost" href="#/">Till översikten</a></div>`;
@@ -55,7 +55,7 @@ function shell() {
   const admin = isAdmin();
   document.getElementById('app').innerHTML = `
   <aside class="side">
-    <a class="brand" href="#/"><span class="ball"></span><span><b>Böteskassan</b><small>26/27 · <span data-team>${esc(S.settings.team_name)}</span></small></span></a>
+    <a class="brand" href="#/"><span class="ball"></span><span><b>Böteskassan</b><small><b>Falu BS Bandy</b> · 26/27</small></span></a>
     ${admin ? `<button class="btn primary block quick" data-quick="fine">${icon('plus')} Ny bot <kbd>N</kbd></button>` : ''}
     <nav>${NAV.map(([k, l, ic]) => `<a href="#/${k}" data-nav="${k}">${icon(ic)}<span>${l}</span></a>`).join('')}</nav>
     <div class="me"><span>${esc(S.me.display_name)}<small>${admin ? 'Administratör' : 'Läsbehörighet'}</small></span><button class="icon-btn" data-logout title="Logga ut" aria-label="Logga ut">${icon('logout')}</button></div>
@@ -93,7 +93,7 @@ async function showLogin() {
   if (st.user) { location.hash = '#/'; return; }
   const setup = st.needs_setup;
   document.getElementById('app').innerHTML = `<div class="login"><form class="login-card" novalidate>
-    <div class="brand big"><span class="ball"></span><span><b>Böteskassan</b><small>Säsongen 2026/2027</small></span></div>
+    <div class="brand big"><span class="ball"></span><span><span class="club">Falu BS Bandy</span><b>Böteskassan</b><small>Säsongen 2026/2027</small></span></div>
     ${setup ? '<h1>Välkommen!</h1><p class="muted">Skapa det första administratörskontot. Det får full behörighet och kan sedan skapa fler användare.</p>' : '<h1>Logga in</h1>'}
     <label class="field"><span>Användarnamn</span><input name="username" autocomplete="username" required autofocus></label>
     ${setup ? '<label class="field"><span>Ditt namn</span><input name="display_name" maxlength="60" placeholder="t.ex. Kassören"></label>' : ''}
