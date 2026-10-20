@@ -98,3 +98,11 @@ server/local.js    lokal server för test
 public/            gränssnittet (index.html, styles.css, js/)
 test/              automatiska tester av arbetsflödena
 ```
+
+## Om funktionen
+`netlify/functions/api.mjs` är en färdigpaketerad fil (allt inklusive `pg` i en fil). Källan är `netlify/src/api.mjs`. Efter ändringar i `server/` bygger du om den med:
+
+```bash
+npx esbuild netlify/src/api.mjs --bundle --platform=node --target=node20 --format=esm --external:pg-native --outfile=netlify/functions/api.mjs --banner:js="import { createRequire as __cr } from 'module'; const require = __cr(import.meta.url);"
+```
+(och ändra sedan `var config` till `export const config` i slutet av filen)
