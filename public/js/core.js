@@ -3,6 +3,10 @@
 export const S = { me: null, settings: null, categories: null };
 export const isAdmin = () => S.me && S.me.role === 'admin';
 export const isPlayer = () => S.me && S.me.role === 'player';
+export const canPay = () => !!(S.me && (S.me.role === 'admin' || S.me.can_register_payments));
+export const LOGO = '<img class="club-logo" src="/img/falu-bs-bandy.png" alt="Falu BS Bandy" width="235" height="225">';
+// 0701234567 → 070-123 45 67, 1234567890 → 123 456 78 90
+export const fmtSwish = (n) => (!n ? '' : /^07\d{8}$/.test(n) ? `${n.slice(0, 3)}-${n.slice(3, 6)} ${n.slice(6, 8)} ${n.slice(8)}` : `${n.slice(0, 3)} ${n.slice(3, 6)} ${n.slice(6, 8)} ${n.slice(8)}`);
 export const ROLE = { admin: 'Administratör', viewer: 'Läsbehörighet', player: 'Spelare' };
 
 // ---------- API ----------
@@ -57,7 +61,7 @@ export const STATUS = { obetald: ['Obetald', 'red'], delvis: ['Delvis betald', '
 export const statusPill = (s) => `<span class="pill ${STATUS[s][1]}">${STATUS[s][0]}</span>`;
 export const demoTag = (x) => (x ? '<span class="pill demo" title="Exempeldata – inte en riktig registrering">Exempel</span>' : '');
 // Belopp för en bot: slutbelopp, och vid juniorrabatt även ordinarie belopp och rabatt.
-export const fineAmt = (f) => `${kr(f.amount)}${f.discount_amount > 0 ? `<br><small class="muted">ord. ${kr(f.base_amount)} · junior −${kr(f.discount_amount)}</small>` : ''}`;
+export const fineAmt = (f) => `${kr(f.amount)}${f.discount_amount > 0 ? `<br><small class="muted">ord. ${kr(f.base_amount)} · junior −${kr(f.discount_amount)}</small>` : f.junior_exempt ? '<br><small class="muted">fullt pris – ingen juniorrabatt</small>' : ''}`;
 export const juniorTag = (p) => (p && p.junior_discount > 0 ? `<span class="pill junior" title="Juniorrabatt ${p.junior_discount} % på nya böter">Junior −${p.junior_discount} %</span>` : '');
 export const REPORT = { pending: ['Väntar på godkännande', 'amber'], disputed: ['Bestriden – admin avgör', 'red'], approved: ['Godkänd', 'green'], rejected: ['Avslagen', 'grey'] };
 export const reportPill = (s) => `<span class="pill ${REPORT[s][1]}">${REPORT[s][0]}</span>`;
@@ -141,11 +145,11 @@ export async function busy(btn, fn) {
   try { return await fn(); } finally { btn.disabled = false; btn.classList.remove('busy'); btn.innerHTML = label; }
 }
 
-export async function copyText(text) {
-  try { await navigator.clipboard.writeText(text); toast('Kopierat – klistra in i lagets chatt.'); }
+export async function copyText(text, okMsg = 'Kopierat – klistra in i lagets chatt.') {
+  try { await navigator.clipboard.writeText(text); toast(okMsg); }
   catch {
     const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select();
-    try { document.execCommand('copy'); toast('Kopierat – klistra in i lagets chatt.'); } catch { toast('Kunde inte kopiera. Markera texten och kopiera manuellt.', 'err'); }
+    try { document.execCommand('copy'); toast(okMsg); } catch { toast('Kunde inte kopiera. Markera texten och kopiera manuellt.', 'err'); }
     ta.remove();
   }
 }

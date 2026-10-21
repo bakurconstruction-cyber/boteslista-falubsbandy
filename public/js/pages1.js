@@ -1,6 +1,6 @@
 // Sidor: Översikt, Spelare, Spelarprofil, Böter, Inbetalningar
-import { S, get, post, del, esc, kr, num, fmtDate, monthName, statusPill, demoTag, placeBadge, icon, isAdmin, isPlayer, barChart, empty, confirmDialog, toast, fail, copyText, reminderText, playerOpts, fineAmt, juniorTag } from './core.js';
-import { fineForm, paymentForm, playerForm, importForm, fineDetail, paymentDetail, cashForm, reportForm, reportCard, decideReport, accountForm } from './forms.js';
+import { S, get, post, del, esc, kr, num, fmtDate, monthName, statusPill, demoTag, placeBadge, icon, isAdmin, isPlayer, canPay, barChart, empty, confirmDialog, toast, fail, copyText, reminderText, playerOpts, fineAmt, juniorTag } from './core.js';
+import { fineForm, paymentForm, playerForm, importForm, fineDetail, paymentDetail, cashForm, reportForm, reportCard, decideReport, accountForm, swishCard, bindSwish } from './forms.js';
 import { refresh } from './app.js';
 
 const kpi = (label, value, { cls = '', sub = '', href = '' } = {}) =>
@@ -8,12 +8,18 @@ const kpi = (label, value, { cls = '', sub = '', href = '' } = {}) =>
 const names = (arr, f) => (arr.length ? arr.map((x) => `<a href="#/spelare/${esc(x.id)}">${esc(x.name)}</a>`).join(', ') + (f ? ` <small>${f(arr[0])}</small>` : '') : '<span class="muted">–</span>');
 
 // ---------- Översikt ----------
+async function playerDebtNotice() {
+  const me = (await get(`/api/players/${encodeURIComponent(S.me.player_id)}`)).player;
+  return me.debt > 0 ? `<div class="notice warn-notice">${icon('phone')}<div><b>Din skuld: ${kr(me.debt)}.</b> Betala enkelt med Swish från din sida.</div><a class="btn small primary" href="#/spelare/${esc(me.id)}">Betala din skuld</a></div>` : '';
+}
 export async function dashboard(el) {
   const d = await get('/api/dashboard');
   const admin = isAdmin();
   el.innerHTML = `
   <div class="page-h"><div><h1>Översikt</h1><p class="muted">Säsong ${esc(d.season.name)} · ${monthName(d.month)}</p></div>
     ${admin ? `<div class="btns"><button class="btn primary" data-act="fine">${icon('plus')} Ny bot</button><button class="btn ghost" data-act="pay">${icon('coin')} Inbetalning</button></div>` : isPlayer() ? `<div class="btns"><button class="btn primary" data-act="report">${icon('flag')} Anmäl bot</button><a class="btn ghost" href="#/spelare/${esc(S.me.player_id)}">Min sida</a></div>` : ''}</div>
+  ${isPlayer() ? await playerDebtNotice() : ''}
+  ${!isAdmin() && canPay() ? `<div class="notice">${icon('shield')}<div><b>Du har kassabehörighet.</b> Registrera betalningar som har kommit in.</div><a class="btn small ghost" href="#/registrera-betalning">Registrera betalningar</a></div>` : ''}
   ${d.reports.todo ? `<div class="notice warn-notice">${icon('flag')}<div>${admin ? `<b>${d.reports.todo} ${d.reports.todo === 1 ? 'anmälan' : 'anmälningar'} att hantera</b>${d.reports.disputed ? ` – varav ${d.reports.disputed} bestridda` : ''}.` : `<b>Du har ${d.reports.todo} ${d.reports.todo === 1 ? 'anmälan' : 'anmälningar'} att svara på.</b> Godkänn eller bestrid.`}</div><a class="btn small primary" href="#/anmalningar">Visa</a></div>` : ''}
   ${!d.players_total && admin ? `<div class="notice">${icon('info')}<div><b>Kom igång:</b> lägg till lagets spelare under <a href="#/spelare">Spelare</a> (en i taget eller via CSV-import). Böteslistan 2026/2027 är redan inlagd.</div></div>` : ''}
   <section class="kpis">
@@ -104,6 +110,8 @@ let profileTab = 'fines';
 export async function profile(el, [id]) {
   const d = await get(`/api/players/${encodeURIComponent(id)}`);
   const p = d.player; const admin = isAdmin();
+  const own = isPlayer() && p.id === S.me.player_id;
+  const swish = own ? await swishCard() : '';
   const overdue = d.fines.filter((f) => f.overdue);
   const canDelete = !d.fines.length && !d.payments.length && !d.refunds.length;
   const catRows = Object.entries(d.categories).sort((a, b) => b[1].amount - a[1].amount);
@@ -121,11 +129,14 @@ export async function profile(el, [id]) {
       <button class="btn ghost" data-act="toggle">${p.active ? 'Inaktivera' : 'Aktivera'}</button>
       ${canDelete ? `<button class="btn ghost danger" data-act="delete">${icon('trash')} Ta bort</button>` : ''}</div>` : isPlayer() && p.active && p.id !== S.me.player_id && !p.is_demo ? `<div class="btns"><button class="btn primary" data-act="report">${icon('flag')} Anmäl bot</button></div>` : ''}
   </div>
+  ${swish}
   ${admin && !p.is_demo ? `<section class="card admin-box"><div class="admin-row">
       <label class="switch sm-row"><input type="checkbox" data-junior ${p.junior_discount ? 'checked' : ''}><span></span><div><b>Juniorrabatt 50 %</b><small>Dras på alla nya böter när de blir officiella. Ordinarie belopp i böteslistan ändras inte, och befintliga böter ändras inte. Kopplad till spelaren – inte till tröjnumret.</small></div></label>
     </div><div class="admin-row">
       <div class="acc">${icon('key')}<div><b>Spelarkonto</b><small>${d.account ? (d.account.active ? `Aktivt – loggar in med tröjnummer <b>${esc(p.jersey || '?')}</b>` : 'Avstängt') : 'Inget konto ännu'}</small></div></div>
       ${d.account ? '<a class="btn small ghost" href="#/installningar" data-act="users">Hantera konton</a>' : `<button class="btn small ghost" data-act="account">${icon('plus')} Skapa konto</button>`}
+    </div><div class="admin-row">
+      <label class="switch sm-row"><input type="checkbox" data-paperm ${p.can_register_payments ? 'checked' : ''}><span></span><div><b>Kassabehörighet – får registrera verifierade betalningar</b><small>Ger tillgång till sidan Registrera betalningar (hel- och delbetalningar efter kontroll). Kan inte ändra böter, rabatter, inställningar eller behörigheter, och kan inte rätta betalningar. Kopplad till spelaren – inte tröjnumret.</small></div></label>
     </div></section>` : ''}
   <section class="kpis">
     ${kpi('Utfärdade böter', kr(p.issued), { sub: `${p.fine_count} st`, cls: 'accent' })}
@@ -153,6 +164,13 @@ export async function profile(el, [id]) {
   };
   const drawTab = () => { el.querySelector('[data-tabbody]').innerHTML = bodies[profileTab](); el.querySelectorAll('[data-tab]').forEach((b) => b.classList.toggle('on', b.dataset.tab === profileTab)); };
   drawTab();
+  if (own) bindSwish(el);
+  el.querySelector('[data-paperm]')?.addEventListener('change', async (e) => {
+    const on = e.target.checked;
+    const ok = await confirmDialog({ title: on ? `Ge ${p.name} kassabehörighet?` : `Återkalla kassabehörighet för ${p.name}?`, text: on ? `${esc(p.first_name)} får registrera betalningar som hen har kontrollerat har kommit in. Allt loggas med namn och tid.` : 'Sidan Registrera betalningar försvinner direkt för spelaren. Redan registrerade betalningar ändras inte.', confirm: on ? 'Ge behörighet' : 'Återkalla', danger: !on });
+    if (!ok) { e.target.checked = !on; return; }
+    try { await post(`/api/players/${encodeURIComponent(p.id)}/payment-permission`, { enabled: on }); toast(on ? 'Kassabehörighet given.' : 'Kassabehörighet återkallad.'); refresh(); } catch (err) { fail(err); e.target.checked = !on; }
+  });
   el.querySelector('[data-junior]')?.addEventListener('change', async (e) => {
     const on = e.target.checked;
     const ok = await confirmDialog({ title: on ? `Aktivera juniorrabatt för ${p.name}?` : `Stäng av juniorrabatt för ${p.name}?`, text: on ? '50 % dras automatiskt på alla böter som blir officiella från och med nu. Befintliga böter ändras inte.' : 'Nya böter blir fullt pris. Befintliga böter med rabatt ändras inte.', confirm: on ? 'Aktivera' : 'Stäng av', danger: !on });
@@ -162,7 +180,7 @@ export async function profile(el, [id]) {
   el.onclick = async (e) => {
     const t = e.target.closest('[data-tab]'); if (t) { profileTab = t.dataset.tab; return drawTab(); }
     const fr = e.target.closest('[data-fine],[data-fineno]'); if (fr) { e.preventDefault(); return fineDetail(fr.dataset.fine || fr.dataset.fineno); }
-    const rb = e.target.closest('[data-rep]'); if (rb) { const r = d.reports.find((x) => x.id === Number(rb.dataset.rid)); return r && decideReport(r, rb.dataset.rep); }
+    const rb = e.target.closest('[data-rep]'); if (rb) { const r = d.reports.find((x) => x.id === Number(rb.dataset.rid)); return r && decideReport(r, rb.dataset.rep, rb.closest('.rep')); }
     const pr = e.target.closest('[data-pay]'); if (pr) return paymentDetail(pr.dataset.pay);
     const a = e.target.closest('[data-act]'); if (!a) return;
     const act = a.dataset.act;

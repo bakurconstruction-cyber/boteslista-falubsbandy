@@ -84,6 +84,7 @@ async function loadState(db, season, today = todayStr()) {
     f.status = f.voided ? 'makulerad' : f.paid >= f.amount ? 'betald' : f.paid > 0 ? 'delvis' : 'obetald';
     f.paid_date = f.status === 'betald' ? list.reduce((m, a) => (a.payment_date > m ? a.payment_date : m), '') : null;
     f.overdue = !f.voided && f.remaining > 0 && f.due_date < today;
+    f.junior_exempt = !f.discount_amount && /Juniorrabatt gäller inte/.test(f.calc || ''); // junior som betalat fullt (t.ex. Avslagen klubba)
     fineById.set(f.id, f);
   }
   for (const p of payments) {

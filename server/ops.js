@@ -241,8 +241,10 @@ async function insertFine(db, user, season, input, { isDemo = false, ruleKey = n
   if (amount <= 0) fail('Bötesbeloppet måste vara större än 0 kr.');
   if (amount > MAX_AMOUNT) fail('Bötesbeloppet är orimligt högt.');
   // Juniorrabatt: räknas en gång, när boten blir officiell, på spelarens ordinarie belopp.
-  const d = discountFor(amount, player.junior_discount);
+  // Undantag: kategorier markerade junior_exempt (Avslagen klubba) kostar alltid fullt belopp.
+  const d = juniorDiscount(amount, player, cat);
   if (d.discount) calc = (calc ? calc + ' · ' : '') + `Juniorrabatt ${d.pct} %: ${kr(amount)} − ${kr(d.discount)} = ${kr(d.final)}`;
+  else if (d.exempt) calc = (calc ? calc + ' · ' : '') + `Juniorrabatt gäller inte ${cat.name}: fullt belopp ${kr(amount)}`;
   const no = isDemo ? 'X-' + String(await nextNumber(db, 'demo_fine')).padStart(4, '0') : 'B-' + String(await nextNumber(db, 'fine')).padStart(4, '0');
   try {
     (await db.run(`INSERT INTO fines (fine_no, season_id, player_id, category_id, category_name, category_number, kind, issued_date, due_date,
@@ -254,6 +256,12 @@ async function insertFine(db, user, season, input, { isDemo = false, ruleKey = n
   }
   await audit(db, user, 'Bot registrerad', 'bot', no, null, { spelare: `${player.first_name} ${player.last_name}`, kategori: `${cat.number}. ${cat.name}`, belopp: kr(d.final), ...(d.discount ? { ordinarie: kr(amount), juniorrabatt: kr(d.discount) } : {}), datum: issued, förfaller: due, beskrivning: description, beräkning: calc });
   return no;
+}
+// Den enda platsen där juniorrabatt bestäms för en ny bot.
+function juniorDiscount(base, player, cat) {
+  const pct = Number(player.junior_discount) || 0;
+  if (pct > 0 && cat.junior_exempt) return { final: base, discount: 0, pct: 0, exempt: true };
+  return { ...discountFor(base, pct), exempt: false };
 }
 function discountFor(base, pct) {
   pct = Number(pct) || 0;
@@ -342,8 +350,11 @@ async function manualItems(db, list) {
   if (!Array.isArray(list)) fail('Ogiltig fördelning.');
   return list.map((x) => ({ fine_id: Number(x.fine_id), amount: x.amount === '' || x.amount == null ? 0 : parseKr(x.amount, 'Fördelat belopp', { allowZero: true }) })).filter((x) => x.amount > 0);
 }
-async function createPayment(db, user, season, body, { isDemo = false } = {}) {
-  return tx(async (db) => {
+async function createPayment(db, user, season, body, opts = {}) {
+  return tx((t) => createPaymentTx(t, user, season, body, opts));
+}
+async function createPaymentTx(db, user, season, body, { isDemo = false } = {}) {
+  {
     const player = await getPlayer(db, body.player_id);
     isDemo = isDemo || !!player.is_demo;
     const d = date(body.date, 'Betalningsdatum');
@@ -365,13 +376,45 @@ async function createPayment(db, user, season, body, { isDemo = false } = {}) {
     }
     const no = isDemo ? 'X-I' + String(await nextNumber(db, 'demo_payment')).padStart(4, '0') : 'I-' + String(await nextNumber(db, 'payment')).padStart(4, '0');
     const payment = await db.get(`INSERT INTO payments (payment_no, season_id, player_id, date, amount, method, reference, comment, idempotency_key, registered_by, is_demo, created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *`, no, season.id, player.id, d, amount, method, reference, comment, key, user.username, isDemo ? 1 : 0, now());
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *`, no, season.id, player.id, d, amount, method, reference, comment, key, who(user), isDemo ? 1 : 0, now());
     const mode = body.allocation_mode || 'auto';
     const items = mode === 'manual' ? await manualItems(db, body.allocations) : mode === 'none' ? [] : await autoItems(db, player.id, season.id, amount);
     const allocated = await allocate(db, payment, items);
     const credit = amount - allocated;
-    await audit(db, user, 'Inbetalning registrerad', 'betalning', no, null, { spelare: `${player.first_name} ${player.last_name}`, datum: d, belopp: kr(amount), metod: method, referens: reference, fördelat: kr(allocated), tillgodo: kr(credit) });
+    await audit(db, user, body.verified ? 'Verifierad inbetalning registrerad' : 'Inbetalning registrerad', 'betalning', no, null, { spelare: `${player.first_name} ${player.last_name}`, datum: d, belopp: kr(amount), metod: method, referens: reference, fördelat: kr(allocated), tillgodo: kr(credit), ...(body.verified ? { verifierad: 'ja – pengarna kontrollerade' } : {}) });
     return { payment_no: no, allocated, credit };
+  }
+}
+// Betalning registrerad av en spelare med kassabehörighet (t.ex. Johannes). Strängare än admin:
+// pengarna måste vara kontrollerade, beloppet får inte överstiga skulden (inga tillgodohavanden),
+// fördelning sker alltid mot obetalda böter (äldst först) och man kan inte registrera sin egen betalning.
+const VERIFY_METHODS = ['Swish', 'Banköverföring', 'Kontant'];
+async function createVerifiedPaymentTx(db, user, season, body) {
+  if (body.verified !== true) fail('Bekräfta att du har kontrollerat att pengarna har kommit in.');
+  if (user.role === 'player' && String(body.player_id) === user.player_id) fail('Du kan inte registrera din egen betalning. Be administratören.', 403);
+  if (!VERIFY_METHODS.includes(body.method)) fail('Välj Swish, banköverföring eller kontant.');
+  const amount = parseKr(body.amount);
+  const st = await L.loadState(db, season);
+  const p = st.playerById.get(String(body.player_id || ''));
+  if (!p || p.is_demo) fail('Spelaren finns inte.', 404);
+  if (p.debt <= 0) fail(`${p.name} har ingen obetald skuld.`, 409, 'no_debt');
+  if (amount > p.debt) fail(`Beloppet (${kr(amount)}) är större än skulden (${kr(p.debt)}). Överskott hanteras av administratören.`);
+  if (body.mode === 'full' && amount !== p.debt) fail('Skulden har ändrats sedan sidan laddades. Ladda om och försök igen.', 409, 'debt_changed');
+  return createPaymentTx(db, user, season, {
+    player_id: p.id, date: body.date, amount: String(amount / 100), method: body.method, reference: body.reference,
+    comment: str(body.comment, 'Kommentar', { max: 300 }) || (body.mode === 'full' ? 'Hela skulden – verifierad' : 'Delbetalning – verifierad'),
+    idempotency_key: body.idempotency_key, confirm_duplicate: !!body.confirm_duplicate, allocation_mode: 'auto', verified: true,
+  });
+}
+// Administratören ger eller återkallar kassabehörighet. Kopplad till spelar-ID.
+async function setPaymentPermission(db, user, id, enabled) {
+  return tx(async (db) => {
+    const p = await getPlayer(db, id);
+    if (p.is_demo) fail('Exempelspelare kan inte få behörighet.');
+    const v = enabled ? 1 : 0;
+    if (p.can_register_payments === v) return;
+    (await db.run('UPDATE players SET can_register_payments = ? WHERE id = ?', v, p.id));
+    await audit(db, user, enabled ? 'Kassabehörighet given' : 'Kassabehörighet återkallad', 'spelare', p.id, { kassabehörighet: !!p.can_register_payments }, { kassabehörighet: !!v });
   });
 }
 async function allocateCredit(db, user, season, playerId, body) {
@@ -515,12 +558,21 @@ async function closeMonth(db, user, season, period, body) {
 }
 
 // ---------- Inställningar & säsong ----------
+// Swish-nummer: privat mobilnummer (07…) eller företags-/föreningsnummer (123…, 9…). Sparas som siffror.
+function swishNumber(v) {
+  const s = String(v || '').replace(/[\s-]/g, '').replace(/^\+46/, '0').replace(/^46(?=7)/, '0');
+  if (!s) return '';
+  if (!/^(07\d{8}|123\d{7}|9\d{9})$/.test(s)) fail('Swish-numret ska vara ett mobilnummer (07X XXX XX XX) eller ett Swish-företagsnummer (123 XXX XX XX).');
+  return s;
+}
 async function updateSettings(db, user, body) {
   return tx(async (db) => {
     const old = await L.getSettings(db);
     const next = {};
     if (body.team_name != null) next.team_name = str(body.team_name, 'Lagnamn', { max: 80, required: true });
     if (body.payment_info != null) next.payment_info = str(body.payment_info, 'Betalningsinformation', { max: 300, required: true });
+    if (body.swish_number != null) next.swish_number = swishNumber(body.swish_number);
+    if (body.swish_name != null) next.swish_name = str(body.swish_name, 'Mottagarens namn', { max: 50 });
     if (body.start_balance != null) next.start_balance = String(parseKr(String(body.start_balance), 'Startsaldo', { allowZero: true }));
     for (const k of ['rule22_enabled', 'rule23_enabled', 'rule29_enabled']) if (body[k] != null) next[k] = body[k] ? '1' : '0';
     if (body.rule22_days != null) {
@@ -651,9 +703,17 @@ async function createReport(db, user, season, body) {
     return r;
   });
 }
-async function approveReport(db, user, season, id, { asPlayer = false, note = '' } = {}) {
+// Godkänner EN anmälan, identifierad av sitt id. Klienten skickar även anmälningsnumret och den status
+// den såg; stämmer de inte (inaktuell sida, fel kort) görs ingenting. Allt sker i en transaktion under
+// lås, och databasen (unikt report_id på böter + trigger) stoppar dubbla böter och statusbyten.
+function assertSameReport(r, expect) {
+  if (expect?.report_no && expect.report_no !== r.report_no) fail('Fel anmälan – ladda om sidan.', 409, 'stale');
+  if (expect?.status && expect.status !== r.status) fail(`${r.report_no} har redan hanterats (status ändrad). Sidan uppdateras.`, 409, 'stale');
+}
+async function approveReport(db, user, season, id, { asPlayer = false, note = '', expect = null } = {}) {
   return tx(async (db) => {
     const r = await getReport(db, id);
+    assertSameReport(r, expect);
     if (asPlayer) {
       if (user.player_id !== r.player_id) fail('Bara den anmälda spelaren kan godkänna sin anmälan.', 403);
       if (r.status !== 'pending') fail(r.status === 'disputed' ? 'Du har bestridit anmälan – administratören avgör den nu.' : 'Anmälan är redan avgjord.', 409, 'already_decided');
@@ -668,12 +728,13 @@ async function approveReport(db, user, season, id, { asPlayer = false, note = ''
       fine.id, who(user), now(), decisionNote || null, asPlayer ? 1 : 0, r.id);
     if (upd.changes !== 1) fail('Anmälan är redan avgjord.', 409, 'already_decided'); // transaktionen rullas tillbaka – ingen bot skapas
     await audit(db, user, asPlayer ? 'Anmälan godkänd av den anmälde' : 'Anmälan godkänd', 'anmälan', r.report_no, { status: r.status }, { status: 'godkänd', bot: fineNo });
-    return { fine_no: fineNo };
+    return { fine_no: fineNo, report: { id: r.id, report_no: r.report_no, status: 'approved' } };
   });
 }
 async function disputeReport(db, user, id, body) {
   return tx(async (db) => {
     const r = await getReport(db, id);
+    assertSameReport(r, body.expect);
     if (user.player_id !== r.player_id) fail('Bara den anmälda spelaren kan bestrida sin anmälan.', 403);
     if (r.status !== 'pending') fail('Anmälan kan inte bestridas i nuvarande status.', 409, 'already_decided');
     const reason = str(body.reason, 'Varför du bestrider', { required: true, max: 300 });
@@ -684,6 +745,7 @@ async function disputeReport(db, user, id, body) {
 async function rejectReport(db, user, id, body) {
   return tx(async (db) => {
     const r = await getReport(db, id);
+    assertSameReport(r, body.expect);
     if (!['pending', 'disputed'].includes(r.status)) fail('Anmälan är redan avgjord.', 409, 'already_decided');
     const reason = str(body.reason, 'Anledning', { required: true, max: 300 });
     (await db.run("UPDATE fine_reports SET status = 'rejected', decided_by = ?, decided_at = ?, decision_note = ? WHERE id = ?", who(user), now(), reason, r.id));
@@ -696,6 +758,8 @@ module.exports = {
   createPlayer: (db, user, body) => tx(async (db) => await createPlayer(db, user, body)),
   updatePlayer, setPlayerActive, deletePlayer, importPlayers, updateCategory, setJuniorDiscount, assertJerseyFreeForLogin,
   createReport, approveReport, disputeReport, rejectReport, getPlayer, who,
+  createVerifiedPayment: (db, user, season, body) => tx(async (t) => createVerifiedPaymentTx(t, user, season, body)),
+  setPaymentPermission, swishNumber, juniorDiscount,
   createFines, editFine, voidFine, createPayment, allocateCredit, reversePayment,
   createCashEvent, voidCashEvent, applyRule, closeMonth, updateSettings, updateSeason, seedDemo, removeDemo, playerCredit,
 };

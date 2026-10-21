@@ -15932,6 +15932,7 @@ var require_logic = __commonJS({
         f.status = f.voided ? "makulerad" : f.paid >= f.amount ? "betald" : f.paid > 0 ? "delvis" : "obetald";
         f.paid_date = f.status === "betald" ? list.reduce((m, a) => a.payment_date > m ? a.payment_date : m, "") : null;
         f.overdue = !f.voided && f.remaining > 0 && f.due_date < today;
+        f.junior_exempt = !f.discount_amount && /Juniorrabatt gäller inte/.test(f.calc || "");
         fineById.set(f.id, f);
       }
       for (const p of payments) {
@@ -16572,8 +16573,9 @@ var require_ops = __commonJS({
       }
       if (amount <= 0) fail("B\xF6tesbeloppet m\xE5ste vara st\xF6rre \xE4n 0 kr.");
       if (amount > MAX_AMOUNT) fail("B\xF6tesbeloppet \xE4r orimligt h\xF6gt.");
-      const d = discountFor(amount, player.junior_discount);
+      const d = juniorDiscount(amount, player, cat);
       if (d.discount) calc = (calc ? calc + " \xB7 " : "") + `Juniorrabatt ${d.pct} %: ${kr(amount)} \u2212 ${kr(d.discount)} = ${kr(d.final)}`;
+      else if (d.exempt) calc = (calc ? calc + " \xB7 " : "") + `Juniorrabatt g\xE4ller inte ${cat.name}: fullt belopp ${kr(amount)}`;
       const no = isDemo ? "X-" + String(await nextNumber(db, "demo_fine")).padStart(4, "0") : "B-" + String(await nextNumber(db, "fine")).padStart(4, "0");
       try {
         await db.run(`INSERT INTO fines (fine_no, season_id, player_id, category_id, category_name, category_number, kind, issued_date, due_date,
@@ -16585,6 +16587,11 @@ var require_ops = __commonJS({
       }
       await audit(db, user, "Bot registrerad", "bot", no, null, { spelare: `${player.first_name} ${player.last_name}`, kategori: `${cat.number}. ${cat.name}`, belopp: kr(d.final), ...d.discount ? { ordinarie: kr(amount), juniorrabatt: kr(d.discount) } : {}, datum: issued, f\u00F6rfaller: due, beskrivning: description, ber\u00E4kning: calc });
       return no;
+    }
+    function juniorDiscount(base, player, cat) {
+      const pct = Number(player.junior_discount) || 0;
+      if (pct > 0 && cat.junior_exempt) return { final: base, discount: 0, pct: 0, exempt: true };
+      return { ...discountFor(base, pct), exempt: false };
     }
     function discountFor(base, pct) {
       pct = Number(pct) || 0;
@@ -16679,9 +16686,12 @@ var require_ops = __commonJS({
       if (!Array.isArray(list)) fail("Ogiltig f\xF6rdelning.");
       return list.map((x) => ({ fine_id: Number(x.fine_id), amount: x.amount === "" || x.amount == null ? 0 : parseKr(x.amount, "F\xF6rdelat belopp", { allowZero: true }) })).filter((x) => x.amount > 0);
     }
-    async function createPayment(db, user, season, body, { isDemo = false } = {}) {
-      return tx(async (db2) => {
-        const player = await getPlayer(db2, body.player_id);
+    async function createPayment(db, user, season, body, opts = {}) {
+      return tx((t) => createPaymentTx(t, user, season, body, opts));
+    }
+    async function createPaymentTx(db, user, season, body, { isDemo = false } = {}) {
+      {
+        const player = await getPlayer(db, body.player_id);
         isDemo = isDemo || !!player.is_demo;
         const d = date(body.date, "Betalningsdatum");
         if (!isDemo) notFuture(d, "Betalningsdatum");
@@ -16693,22 +16703,57 @@ var require_ops = __commonJS({
         const comment = str(body.comment, "Kommentar", { max: 500 });
         const key = body.idempotency_key ? str(body.idempotency_key, "Nyckel", { max: 80 }) : null;
         if (key) {
-          const ex = await db2.get("SELECT payment_no FROM payments WHERE idempotency_key = ?", key);
+          const ex = await db.get("SELECT payment_no FROM payments WHERE idempotency_key = ?", key);
           if (ex) fail(`Betalningen \xE4r redan registrerad (${ex.payment_no}). Ingen dubblett skapades.`, 409, "already_registered");
         }
         if (!body.confirm_duplicate) {
-          const dup = await db2.get("SELECT payment_no FROM payments WHERE player_id=? AND date=? AND amount=? AND reversed=0", player.id, d, amount);
+          const dup = await db.get("SELECT payment_no FROM payments WHERE player_id=? AND date=? AND amount=? AND reversed=0", player.id, d, amount);
           if (dup) fail(`Det finns redan en inbetalning fr\xE5n ${player.first_name} ${player.last_name} p\xE5 ${kr(amount)} samma dag (${dup.payment_no}). \xC4r det en ny betalning?`, 409, "possible_duplicate");
         }
-        const no = isDemo ? "X-I" + String(await nextNumber(db2, "demo_payment")).padStart(4, "0") : "I-" + String(await nextNumber(db2, "payment")).padStart(4, "0");
-        const payment = await db2.get(`INSERT INTO payments (payment_no, season_id, player_id, date, amount, method, reference, comment, idempotency_key, registered_by, is_demo, created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *`, no, season.id, player.id, d, amount, method, reference, comment, key, user.username, isDemo ? 1 : 0, now());
+        const no = isDemo ? "X-I" + String(await nextNumber(db, "demo_payment")).padStart(4, "0") : "I-" + String(await nextNumber(db, "payment")).padStart(4, "0");
+        const payment = await db.get(`INSERT INTO payments (payment_no, season_id, player_id, date, amount, method, reference, comment, idempotency_key, registered_by, is_demo, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *`, no, season.id, player.id, d, amount, method, reference, comment, key, who(user), isDemo ? 1 : 0, now());
         const mode = body.allocation_mode || "auto";
-        const items = mode === "manual" ? await manualItems(db2, body.allocations) : mode === "none" ? [] : await autoItems(db2, player.id, season.id, amount);
-        const allocated = await allocate(db2, payment, items);
+        const items = mode === "manual" ? await manualItems(db, body.allocations) : mode === "none" ? [] : await autoItems(db, player.id, season.id, amount);
+        const allocated = await allocate(db, payment, items);
         const credit = amount - allocated;
-        await audit(db2, user, "Inbetalning registrerad", "betalning", no, null, { spelare: `${player.first_name} ${player.last_name}`, datum: d, belopp: kr(amount), metod: method, referens: reference, f\u00F6rdelat: kr(allocated), tillgodo: kr(credit) });
+        await audit(db, user, body.verified ? "Verifierad inbetalning registrerad" : "Inbetalning registrerad", "betalning", no, null, { spelare: `${player.first_name} ${player.last_name}`, datum: d, belopp: kr(amount), metod: method, referens: reference, f\u00F6rdelat: kr(allocated), tillgodo: kr(credit), ...body.verified ? { verifierad: "ja \u2013 pengarna kontrollerade" } : {} });
         return { payment_no: no, allocated, credit };
+      }
+    }
+    var VERIFY_METHODS = ["Swish", "Bank\xF6verf\xF6ring", "Kontant"];
+    async function createVerifiedPaymentTx(db, user, season, body) {
+      if (body.verified !== true) fail("Bekr\xE4fta att du har kontrollerat att pengarna har kommit in.");
+      if (user.role === "player" && String(body.player_id) === user.player_id) fail("Du kan inte registrera din egen betalning. Be administrat\xF6ren.", 403);
+      if (!VERIFY_METHODS.includes(body.method)) fail("V\xE4lj Swish, bank\xF6verf\xF6ring eller kontant.");
+      const amount = parseKr(body.amount);
+      const st = await L.loadState(db, season);
+      const p = st.playerById.get(String(body.player_id || ""));
+      if (!p || p.is_demo) fail("Spelaren finns inte.", 404);
+      if (p.debt <= 0) fail(`${p.name} har ingen obetald skuld.`, 409, "no_debt");
+      if (amount > p.debt) fail(`Beloppet (${kr(amount)}) \xE4r st\xF6rre \xE4n skulden (${kr(p.debt)}). \xD6verskott hanteras av administrat\xF6ren.`);
+      if (body.mode === "full" && amount !== p.debt) fail("Skulden har \xE4ndrats sedan sidan laddades. Ladda om och f\xF6rs\xF6k igen.", 409, "debt_changed");
+      return createPaymentTx(db, user, season, {
+        player_id: p.id,
+        date: body.date,
+        amount: String(amount / 100),
+        method: body.method,
+        reference: body.reference,
+        comment: str(body.comment, "Kommentar", { max: 300 }) || (body.mode === "full" ? "Hela skulden \u2013 verifierad" : "Delbetalning \u2013 verifierad"),
+        idempotency_key: body.idempotency_key,
+        confirm_duplicate: !!body.confirm_duplicate,
+        allocation_mode: "auto",
+        verified: true
+      });
+    }
+    async function setPaymentPermission(db, user, id, enabled) {
+      return tx(async (db2) => {
+        const p = await getPlayer(db2, id);
+        if (p.is_demo) fail("Exempelspelare kan inte f\xE5 beh\xF6righet.");
+        const v = enabled ? 1 : 0;
+        if (p.can_register_payments === v) return;
+        await db2.run("UPDATE players SET can_register_payments = ? WHERE id = ?", v, p.id);
+        await audit(db2, user, enabled ? "Kassabeh\xF6righet given" : "Kassabeh\xF6righet \xE5terkallad", "spelare", p.id, { kassabeh\u00F6righet: !!p.can_register_payments }, { kassabeh\u00F6righet: !!v });
       });
     }
     async function allocateCredit(db, user, season, playerId, body) {
@@ -16847,12 +16892,20 @@ var require_ops = __commonJS({
         await audit(db2, user, "M\xE5nad avst\xE4md", "m\xE5nad", period, null, { note });
       });
     }
+    function swishNumber(v) {
+      const s = String(v || "").replace(/[\s-]/g, "").replace(/^\+46/, "0").replace(/^46(?=7)/, "0");
+      if (!s) return "";
+      if (!/^(07\d{8}|123\d{7}|9\d{9})$/.test(s)) fail("Swish-numret ska vara ett mobilnummer (07X XXX XX XX) eller ett Swish-f\xF6retagsnummer (123 XXX XX XX).");
+      return s;
+    }
     async function updateSettings(db, user, body) {
       return tx(async (db2) => {
         const old = await L.getSettings(db2);
         const next = {};
         if (body.team_name != null) next.team_name = str(body.team_name, "Lagnamn", { max: 80, required: true });
         if (body.payment_info != null) next.payment_info = str(body.payment_info, "Betalningsinformation", { max: 300, required: true });
+        if (body.swish_number != null) next.swish_number = swishNumber(body.swish_number);
+        if (body.swish_name != null) next.swish_name = str(body.swish_name, "Mottagarens namn", { max: 50 });
         if (body.start_balance != null) next.start_balance = String(parseKr(String(body.start_balance), "Startsaldo", { allowZero: true }));
         for (const k of ["rule22_enabled", "rule23_enabled", "rule29_enabled"]) if (body[k] != null) next[k] = body[k] ? "1" : "0";
         if (body.rule22_days != null) {
@@ -16999,9 +17052,14 @@ var require_ops = __commonJS({
         return r;
       });
     }
-    async function approveReport(db, user, season, id, { asPlayer = false, note = "" } = {}) {
+    function assertSameReport(r, expect) {
+      if (expect?.report_no && expect.report_no !== r.report_no) fail("Fel anm\xE4lan \u2013 ladda om sidan.", 409, "stale");
+      if (expect?.status && expect.status !== r.status) fail(`${r.report_no} har redan hanterats (status \xE4ndrad). Sidan uppdateras.`, 409, "stale");
+    }
+    async function approveReport(db, user, season, id, { asPlayer = false, note = "", expect = null } = {}) {
       return tx(async (db2) => {
         const r = await getReport(db2, id);
+        assertSameReport(r, expect);
         if (asPlayer) {
           if (user.player_id !== r.player_id) fail("Bara den anm\xE4lda spelaren kan godk\xE4nna sin anm\xE4lan.", 403);
           if (r.status !== "pending") fail(r.status === "disputed" ? "Du har bestridit anm\xE4lan \u2013 administrat\xF6ren avg\xF6r den nu." : "Anm\xE4lan \xE4r redan avgjord.", 409, "already_decided");
@@ -17028,12 +17086,13 @@ var require_ops = __commonJS({
         );
         if (upd.changes !== 1) fail("Anm\xE4lan \xE4r redan avgjord.", 409, "already_decided");
         await audit(db2, user, asPlayer ? "Anm\xE4lan godk\xE4nd av den anm\xE4lde" : "Anm\xE4lan godk\xE4nd", "anm\xE4lan", r.report_no, { status: r.status }, { status: "godk\xE4nd", bot: fineNo });
-        return { fine_no: fineNo };
+        return { fine_no: fineNo, report: { id: r.id, report_no: r.report_no, status: "approved" } };
       });
     }
     async function disputeReport(db, user, id, body) {
       return tx(async (db2) => {
         const r = await getReport(db2, id);
+        assertSameReport(r, body.expect);
         if (user.player_id !== r.player_id) fail("Bara den anm\xE4lda spelaren kan bestrida sin anm\xE4lan.", 403);
         if (r.status !== "pending") fail("Anm\xE4lan kan inte bestridas i nuvarande status.", 409, "already_decided");
         const reason = str(body.reason, "Varf\xF6r du bestrider", { required: true, max: 300 });
@@ -17044,6 +17103,7 @@ var require_ops = __commonJS({
     async function rejectReport(db, user, id, body) {
       return tx(async (db2) => {
         const r = await getReport(db2, id);
+        assertSameReport(r, body.expect);
         if (!["pending", "disputed"].includes(r.status)) fail("Anm\xE4lan \xE4r redan avgjord.", 409, "already_decided");
         const reason = str(body.reason, "Anledning", { required: true, max: 300 });
         await db2.run("UPDATE fine_reports SET status = 'rejected', decided_by = ?, decided_at = ?, decision_note = ? WHERE id = ?", who(user), now(), reason, r.id);
@@ -17071,6 +17131,10 @@ var require_ops = __commonJS({
       rejectReport,
       getPlayer,
       who,
+      createVerifiedPayment: (db, user, season, body) => tx(async (t) => createVerifiedPaymentTx(t, user, season, body)),
+      setPaymentPermission,
+      swishNumber,
+      juniorDiscount,
       createFines,
       editFine,
       voidFine,
@@ -17154,7 +17218,7 @@ var require_app = __commonJS({
     var failures = /* @__PURE__ */ new Map();
     async function userFromToken(db, token) {
       if (!token) return null;
-      const row = await db.get(`SELECT u.*, s.expires_at, p.first_name, p.last_name, p.jersey, p.active AS player_active
+      const row = await db.get(`SELECT u.*, s.expires_at, p.first_name, p.last_name, p.jersey, p.active AS player_active, p.can_register_payments
     FROM sessions s JOIN users u ON u.id = s.user_id LEFT JOIN players p ON p.id = u.player_id WHERE s.token = ?`, token);
       if (!row || !row.active || row.expires_at < (/* @__PURE__ */ new Date()).toISOString()) return null;
       const user = { id: row.id, username: row.username, display_name: row.display_name, role: row.role, token };
@@ -17164,12 +17228,38 @@ var require_app = __commonJS({
           player_id: row.player_id,
           jersey: row.jersey,
           display_name: `${row.first_name} ${row.last_name}`,
+          can_register_payments: !!row.can_register_payments,
           label: `${row.jersey ? `#${row.jersey} ` : ""}${row.first_name} ${row.last_name}`
         });
       }
       return user;
     }
-    var publicUser = (u) => u ? { username: u.username, display_name: u.display_name, role: u.role, player_id: u.player_id || null, jersey: u.jersey || null } : null;
+    var publicUser = (u) => u ? {
+      username: u.username,
+      display_name: u.display_name,
+      role: u.role,
+      player_id: u.player_id || null,
+      jersey: u.jersey || null,
+      can_register_payments: u.role === "admin" || !!u.can_register_payments
+    } : null;
+    var canRegisterPayments = (u) => u.role === "admin" || u.role === "player" && u.can_register_payments === true;
+    var swishMsgSafe = (t) => String(t).normalize("NFC").replace(/[^0-9A-Za-zÅÄÖåäöÉéÜü \-]/g, "").replace(/\s+/g, " ").trim();
+    function swishInfo(settings, p) {
+      const number = settings.swish_number || "";
+      const amountOre = Math.max(0, p.debt);
+      const message = swishMsgSafe(`B\xF6ter ${p.id} ${p.jersey ? `nr ${p.jersey} ` : ""}${p.first_name} ${p.last_name}`).slice(0, 50);
+      const amt = amountOre % 100 ? (amountOre / 100).toFixed(2) : String(amountOre / 100);
+      const url = number && amountOre > 0 ? `https://app.swish.nu/1/p/sw/?sw=${encodeURIComponent(number)}&amt=${encodeURIComponent(amt)}&cur=SEK&msg=${encodeURIComponent(message)}&src=qr` : null;
+      return {
+        configured: !!number,
+        number,
+        name: settings.swish_name || "",
+        amount: amountOre,
+        message,
+        url,
+        note: "Betalningen registreras f\xF6rst n\xE4r kass\xF6ren har kontrollerat att pengarna kommit in."
+      };
+    }
     function readCookie(request) {
       const m = (request.headers.get("cookie") || "").split(";").map((s) => s.trim()).find((s) => s.startsWith(COOKIE + "="));
       return m ? decodeURIComponent(m.slice(COOKIE.length + 1)) : null;
@@ -17312,7 +17402,7 @@ var require_app = __commonJS({
     });
     GET("/api/settings", "auth", async ({ db, user }) => {
       const s = await L.getSettings(db);
-      const out = { team_name: s.team_name, payment_info: s.payment_info, season: await season(db), today: L.todayStr(), demo: !!await db.get("SELECT 1 AS x FROM players WHERE is_demo=1 LIMIT 1"), methods: O.METHODS };
+      const out = { team_name: s.team_name, payment_info: s.payment_info, swish_number: s.swish_number || "", swish_name: s.swish_name || "", season: await season(db), today: L.todayStr(), demo: !!await db.get("SELECT 1 AS x FROM players WHERE is_demo=1 LIMIT 1"), methods: O.METHODS };
       if (user.role === "admin") Object.assign(out, s, { start_balance: Number(s.start_balance) });
       return out;
     });
@@ -17391,17 +17481,44 @@ var require_app = __commonJS({
       return { pending: 0, disputed: 0, todo: 0 };
     }
     GET("/api/reports", "auth", ({ db, user }) => reportsFor(db, user));
+    GET("/api/me/swish", "player", async ({ db, user }) => {
+      const st = await state(db);
+      const p = st.playerById.get(user.player_id);
+      if (!p) O.fail("Spelaren finns inte.", 404);
+      return { ...swishInfo(await L.getSettings(db), p), debt: p.debt, credit: Math.max(0, p.credit), player: { id: p.id, name: p.name, jersey: p.jersey } };
+    });
+    GET("/api/verify/overview", "payments", async ({ db, user }) => {
+      const st = await state(db);
+      const players = st.players.filter((p) => !p.is_demo && p.debt > 0).sort((a, b) => b.debt - a.debt || a.name.localeCompare(b.name, "sv")).map((p) => ({
+        id: p.id,
+        name: p.name,
+        jersey: p.jersey,
+        active: p.active,
+        debt: p.debt,
+        overdue_amount: p.overdue_amount,
+        unpaid_count: p.unpaid_count,
+        self: user.player_id === p.id,
+        fines: st.fines.filter((f) => f.player_id === p.id && f.remaining > 0).sort((a, b) => a.due_date.localeCompare(b.due_date) || a.id - b.id).map((f) => ({ fine_no: f.fine_no, category_name: f.category_name, remaining: f.remaining, due_date: f.due_date, overdue: f.overdue }))
+      }));
+      const recent = st.payments.filter((x) => !x.is_demo).sort((a, b) => b.id - a.id).slice(0, 15).map((x) => ({ payment_no: x.payment_no, player_name: x.player_name, amount: x.amount, date: x.date, method: x.method, reference: x.reference, registered_by: x.registered_by, created_at: x.created_at, reversed: x.reversed }));
+      return { players, recent, total: players.reduce((sum, p) => sum + p.debt, 0), methods: ["Swish", "Bank\xF6verf\xF6ring", "Kontant"], today: st.today };
+    });
+    POST("/api/verify/payments", "payments", async ({ db, user, body }) => O.createVerifiedPayment(db, user, await season(db), body));
+    POST("/api/players/:id/payment-permission", "admin", async ({ db, user, params, body }) => {
+      await O.setPaymentPermission(db, user, params.id, !!body.enabled);
+      return ok;
+    });
     GET("/api/reports/todo", "auth", ({ db, user }) => reportTodo(db, user));
     POST("/api/reports", "player", async ({ db, user, body }) => {
       const r = await O.createReport(db, user, await season(db), body);
       return { id: r.id, report_no: r.report_no };
     });
-    POST("/api/reports/:id/accept", "player", ({ db, user, params }) => season(db).then((s) => O.approveReport(db, user, s, params.id, { asPlayer: true })));
+    POST("/api/reports/:id/accept", "player", async ({ db, user, params, body }) => O.approveReport(db, user, await season(db), params.id, { asPlayer: true, expect: body.expect }));
     POST("/api/reports/:id/dispute", "player", async ({ db, user, params, body }) => {
       await O.disputeReport(db, user, params.id, body);
       return ok;
     });
-    POST("/api/reports/:id/approve", "admin", async ({ db, user, params, body }) => O.approveReport(db, user, await season(db), params.id, { note: body.note }));
+    POST("/api/reports/:id/approve", "admin", async ({ db, user, params, body }) => O.approveReport(db, user, await season(db), params.id, { note: body.note, expect: body.expect }));
     POST("/api/reports/:id/reject", "admin", async ({ db, user, params, body }) => {
       await O.rejectReport(db, user, params.id, body);
       return ok;
@@ -17429,7 +17546,7 @@ var require_app = __commonJS({
         return { id: u.id, login: p.jersey };
       });
     });
-    GET("/api/users", "admin", ({ db }) => db.all(`SELECT u.id, u.username, u.display_name, u.role, u.active, u.created_at, u.player_id, p.jersey, p.active AS player_active,
+    GET("/api/users", "admin", ({ db }) => db.all(`SELECT u.id, u.username, u.display_name, u.role, u.active, u.created_at, u.player_id, p.jersey, p.active AS player_active, p.can_register_payments,
   p.first_name || ' ' || p.last_name AS player_name FROM users u LEFT JOIN players p ON p.id = u.player_id ORDER BY u.id`));
     POST("/api/users", "admin", async ({ user, body }) => {
       const username = validUsername(body.username);
@@ -17591,6 +17708,7 @@ var require_app = __commonJS({
         if (r.level !== "public" && !user) return json({ error: "Du m\xE5ste logga in." }, 401);
         if (r.level === "admin" && user.role !== "admin") return json({ error: user.role === "player" ? "Spelarkonton kan l\xE4sa och anm\xE4la b\xF6ter men inte \xE4ndra uppgifter." : "Du har l\xE4sbeh\xF6righet och kan inte \xE4ndra uppgifter." }, 403);
         if (r.level === "player" && user.role !== "player") return json({ error: "Det h\xE4r kan bara g\xF6ras med ett spelarkonto." }, 403);
+        if (r.level === "payments" && !canRegisterPayments(user)) return json({ error: "Du har inte beh\xF6righet att registrera betalningar." }, 403);
         let body = {};
         if (!["GET", "HEAD", "DELETE"].includes(method)) {
           const text = await request.text();

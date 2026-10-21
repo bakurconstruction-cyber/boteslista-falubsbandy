@@ -1,5 +1,5 @@
 // Appens skal: inloggning, navigation och routing.
-import { S, get, post, esc, icon, isAdmin, isPlayer, ROLE, toast, fail, busy, formData } from './core.js';
+import { S, get, post, esc, icon, isAdmin, isPlayer, canPay, LOGO, ROLE, toast, fail, busy, formData } from './core.js';
 import * as P1 from './pages1.js';
 import * as P2 from './pages2.js';
 import { fineForm, paymentForm, reportForm } from './forms.js';
@@ -11,6 +11,7 @@ const NAV = [
   ['boter', 'Böter', 'list', P1.fines],
   ['anmalningar', 'Anmälningar', 'flag', P3.reports],
   ['betalningar', 'Inbetalningar', 'coin', P1.payments],
+  ['registrera-betalning', 'Registrera betalningar', 'shield', P3.verify, canPay],
   ['leaderboard', 'Leaderboard', 'trophy', P2.leaderboard],
   ['manad', 'Månadsskifte', 'calendar', P2.month],
   ['regler', 'Regler', 'rule', P2.rules],
@@ -33,7 +34,8 @@ async function route(keepScroll = false) {
   if (hash === 'login') return showLogin();
   if (!S.me) return boot();
   const [base, id] = hash.split('/');
-  const fn = id && base === 'spelare' ? ROUTES['spelare/:id'] : ROUTES[base] ?? ROUTES[''];
+  const navItem = NAV.find((n) => n[0] === base);
+  const fn = id && base === 'spelare' ? ROUTES['spelare/:id'] : navItem && navItem[4] && !navItem[4]() ? ROUTES[''] : ROUTES[base] ?? ROUTES[''];
   const main = document.querySelector('main');
   document.querySelectorAll('[data-nav]').forEach((a) => a.classList.toggle('on', a.dataset.nav === base));
   const my = ++rendering; const y = window.scrollY;
@@ -69,10 +71,11 @@ function shell() {
     <a class="brand" href="#/"><span class="ball"></span><span><b>Böteskassan</b><small><b>Falu BS Bandy</b> · 26/27</small></span></a>
     ${admin ? `<button class="btn primary block quick" data-quick="fine">${icon('plus')} Ny bot <kbd>N</kbd></button>` : ''}
     ${player ? `<button class="btn primary block quick" data-quick="report">${icon('flag')} Anmäl bot</button>` : ''}
-    <nav>${NAV.map(([k, l, ic]) => `<a href="#/${k}" data-nav="${k}">${icon(ic)}<span>${l}</span>${k === 'anmalningar' ? '<i class="nav-badge" data-badge hidden></i>' : ''}</a>`).join('')}</nav>
+    <nav>${NAV.filter((n) => !n[4] || n[4]()).map(([k, l, ic]) => `<a href="#/${k}" data-nav="${k}">${icon(ic)}<span>${l}</span>${k === 'anmalningar' ? '<i class="nav-badge" data-badge hidden></i>' : ''}</a>`).join('')}</nav>
     <div class="me"><span>${player && S.me.jersey ? `#${esc(S.me.jersey)} ` : ''}${esc(S.me.display_name)}<small>${ROLE[S.me.role]}</small></span><button class="icon-btn" data-logout title="Logga ut" aria-label="Logga ut">${icon('logout')}</button></div>
   </aside>
   <div class="content">
+    <header class="topbar"><span class="topbar-title">Falu BS Bandy · Böteskassan</span><a href="#/" class="club-logo-link" aria-label="Falu BS Bandy – till översikten">${LOGO}</a></header>
     <div class="demo-banner" data-demo-banner ${S.settings.demo ? '' : 'hidden'}>Exempeldata finns i appen (märkt "Exempel"). Ta bort den under Inställningar → Export & data innan ni börjar på riktigt.</div>
     <main></main>
   </div>
@@ -107,7 +110,7 @@ async function showLogin() {
   const st = await get('/api/status');
   if (st.user) { location.hash = '#/'; return; }
   const setup = st.needs_setup;
-  document.getElementById('app').innerHTML = `<div class="login"><form class="login-card" novalidate>
+  document.getElementById('app').innerHTML = `<div class="login"><div class="login-logo">${LOGO}</div><form class="login-card" novalidate>
     <div class="brand big"><span class="ball"></span><span><span class="club">Falu BS Bandy</span><b>Böteskassan</b><small>Säsongen 2026/2027</small></span></div>
     ${setup ? '<h1>Välkommen!</h1><p class="muted">Skapa det första administratörskontot. Det får full behörighet och kan sedan skapa fler användare.</p>' : '<h1>Logga in</h1>'}
     <label class="field"><span>${setup ? 'Användarnamn' : 'Tröjnummer eller användarnamn'}</span><input name="username" autocomplete="username" required autofocus ${setup ? '' : 'placeholder="Spelare: ditt tröjnummer, t.ex. 7"'}></label>
@@ -134,7 +137,7 @@ async function boot() {
     shell();
     if (location.hash === '#/login') location.hash = '#/'; else route();
   } catch (e) {
-    document.getElementById('app').innerHTML = `<div class="login"><div class="login-card"><h1>Kan inte starta</h1><p>${esc(e.message)}</p><button class="btn primary" onclick="location.reload()">Försök igen</button></div></div>`;
+    document.getElementById('app').innerHTML = `<div class="login"><div class="login-logo">${LOGO}</div><div class="login-card"><h1>Kan inte starta</h1><p>${esc(e.message)}</p><button class="btn primary" onclick="location.reload()">Försök igen</button></div></div>`;
   }
 }
 

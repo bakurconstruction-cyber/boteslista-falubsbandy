@@ -67,18 +67,36 @@ const failures = new Map();
 
 async function userFromToken(db, token) {
   if (!token) return null;
-  const row = await db.get(`SELECT u.*, s.expires_at, p.first_name, p.last_name, p.jersey, p.active AS player_active
+  const row = await db.get(`SELECT u.*, s.expires_at, p.first_name, p.last_name, p.jersey, p.active AS player_active, p.can_register_payments
     FROM sessions s JOIN users u ON u.id = s.user_id LEFT JOIN players p ON p.id = u.player_id WHERE s.token = ?`, token);
   if (!row || !row.active || row.expires_at < new Date().toISOString()) return null;
   const user = { id: row.id, username: row.username, display_name: row.display_name, role: row.role, token };
   if (row.role === 'player') {
     if (!row.player_id || !row.player_active) return null; // inaktiv spelare → kontot spärras
-    Object.assign(user, { player_id: row.player_id, jersey: row.jersey, display_name: `${row.first_name} ${row.last_name}`,
+    Object.assign(user, { player_id: row.player_id, jersey: row.jersey, display_name: `${row.first_name} ${row.last_name}`, can_register_payments: !!row.can_register_payments,
       label: `${row.jersey ? `#${row.jersey} ` : ''}${row.first_name} ${row.last_name}` });
   }
   return user;
 }
-const publicUser = (u) => (u ? { username: u.username, display_name: u.display_name, role: u.role, player_id: u.player_id || null, jersey: u.jersey || null } : null);
+const publicUser = (u) => (u ? { username: u.username, display_name: u.display_name, role: u.role, player_id: u.player_id || null, jersey: u.jersey || null,
+  can_register_payments: u.role === 'admin' || !!u.can_register_payments } : null);
+const canRegisterPayments = (u) => u.role === 'admin' || (u.role === 'player' && u.can_register_payments === true);
+
+// ---------- Swish ----------
+// Privatpersoners Swish (C2C) har inget API som kan bekräfta betalningar. Vi bygger samma länk som
+// Swish egna QR-koder innehåller (app.swish.nu): den öppnar Swish med mottagare, belopp och meddelande
+// förifyllt. Spelaren granskar och godkänner själv i Swish. Ingenting registreras som betalt här.
+const swishMsgSafe = (t) => String(t).normalize('NFC').replace(/[^0-9A-Za-zÅÄÖåäöÉéÜü \-]/g, '').replace(/\s+/g, ' ').trim();
+function swishInfo(settings, p) {
+  const number = settings.swish_number || '';
+  const amountOre = Math.max(0, p.debt);
+  const message = swishMsgSafe(`Böter ${p.id} ${p.jersey ? `nr ${p.jersey} ` : ''}${p.first_name} ${p.last_name}`).slice(0, 50);
+  const amt = amountOre % 100 ? (amountOre / 100).toFixed(2) : String(amountOre / 100);
+  const url = number && amountOre > 0
+    ? `https://app.swish.nu/1/p/sw/?sw=${encodeURIComponent(number)}&amt=${encodeURIComponent(amt)}&cur=SEK&msg=${encodeURIComponent(message)}&src=qr` : null;
+  return { configured: !!number, number, name: settings.swish_name || '', amount: amountOre, message, url,
+    note: 'Betalningen registreras först när kassören har kontrollerat att pengarna kommit in.' };
+}
 function readCookie(request) {
   const m = (request.headers.get('cookie') || '').split(';').map((s) => s.trim()).find((s) => s.startsWith(COOKIE + '='));
   return m ? decodeURIComponent(m.slice(COOKIE.length + 1)) : null;
@@ -215,7 +233,7 @@ GET('/api/rules', 'auth', async ({ db, query }) => {
 });
 GET('/api/settings', 'auth', async ({ db, user }) => {
   const s = await L.getSettings(db);
-  const out = { team_name: s.team_name, payment_info: s.payment_info, season: await season(db), today: L.todayStr(), demo: !!(await db.get('SELECT 1 AS x FROM players WHERE is_demo=1 LIMIT 1')), methods: O.METHODS };
+  const out = { team_name: s.team_name, payment_info: s.payment_info, swish_number: s.swish_number || '', swish_name: s.swish_name || '', season: await season(db), today: L.todayStr(), demo: !!(await db.get('SELECT 1 AS x FROM players WHERE is_demo=1 LIMIT 1')), methods: O.METHODS };
   if (user.role === 'admin') Object.assign(out, s, { start_balance: Number(s.start_balance) });
   return out;
 });
@@ -268,14 +286,36 @@ async function reportTodo(db, user) {
   return { pending: 0, disputed: 0, todo: 0 };
 }
 GET('/api/reports', 'auth', ({ db, user }) => reportsFor(db, user));
+GET('/api/me/swish', 'player', async ({ db, user }) => {
+  const st = await state(db);
+  const p = st.playerById.get(user.player_id);
+  if (!p) O.fail('Spelaren finns inte.', 404);
+  return { ...swishInfo(await L.getSettings(db), p), debt: p.debt, credit: Math.max(0, p.credit), player: { id: p.id, name: p.name, jersey: p.jersey } };
+});
+
+// ---------- Registrera verifierade betalningar (administratör eller spelare med kassabehörighet) ----------
+GET('/api/verify/overview', 'payments', async ({ db, user }) => {
+  const st = await state(db);
+  const players = st.players.filter((p) => !p.is_demo && p.debt > 0).sort((a, b) => b.debt - a.debt || a.name.localeCompare(b.name, 'sv')).map((p) => ({
+    id: p.id, name: p.name, jersey: p.jersey, active: p.active, debt: p.debt, overdue_amount: p.overdue_amount, unpaid_count: p.unpaid_count,
+    self: user.player_id === p.id,
+    fines: st.fines.filter((f) => f.player_id === p.id && f.remaining > 0).sort((a, b) => a.due_date.localeCompare(b.due_date) || a.id - b.id)
+      .map((f) => ({ fine_no: f.fine_no, category_name: f.category_name, remaining: f.remaining, due_date: f.due_date, overdue: f.overdue })),
+  }));
+  const recent = st.payments.filter((x) => !x.is_demo).sort((a, b) => b.id - a.id).slice(0, 15)
+    .map((x) => ({ payment_no: x.payment_no, player_name: x.player_name, amount: x.amount, date: x.date, method: x.method, reference: x.reference, registered_by: x.registered_by, created_at: x.created_at, reversed: x.reversed }));
+  return { players, recent, total: players.reduce((sum, p) => sum + p.debt, 0), methods: ['Swish', 'Banköverföring', 'Kontant'], today: st.today };
+});
+POST('/api/verify/payments', 'payments', async ({ db, user, body }) => O.createVerifiedPayment(db, user, await season(db), body));
+POST('/api/players/:id/payment-permission', 'admin', async ({ db, user, params, body }) => { await O.setPaymentPermission(db, user, params.id, !!body.enabled); return ok; });
 GET('/api/reports/todo', 'auth', ({ db, user }) => reportTodo(db, user));
 POST('/api/reports', 'player', async ({ db, user, body }) => {
   const r = await O.createReport(db, user, await season(db), body);
   return { id: r.id, report_no: r.report_no };
 });
-POST('/api/reports/:id/accept', 'player', ({ db, user, params }) => season(db).then((s) => O.approveReport(db, user, s, params.id, { asPlayer: true })));
+POST('/api/reports/:id/accept', 'player', async ({ db, user, params, body }) => O.approveReport(db, user, await season(db), params.id, { asPlayer: true, expect: body.expect }));
 POST('/api/reports/:id/dispute', 'player', async ({ db, user, params, body }) => { await O.disputeReport(db, user, params.id, body); return ok; });
-POST('/api/reports/:id/approve', 'admin', async ({ db, user, params, body }) => O.approveReport(db, user, await season(db), params.id, { note: body.note }));
+POST('/api/reports/:id/approve', 'admin', async ({ db, user, params, body }) => O.approveReport(db, user, await season(db), params.id, { note: body.note, expect: body.expect }));
 POST('/api/reports/:id/reject', 'admin', async ({ db, user, params, body }) => { await O.rejectReport(db, user, params.id, body); return ok; });
 
 // ---------- Spelarkonton (administratör) ----------
@@ -299,7 +339,7 @@ POST('/api/players/:id/account', 'admin', async ({ user, params, body }) => {
 });
 
 // Användare
-GET('/api/users', 'admin', ({ db }) => db.all(`SELECT u.id, u.username, u.display_name, u.role, u.active, u.created_at, u.player_id, p.jersey, p.active AS player_active,
+GET('/api/users', 'admin', ({ db }) => db.all(`SELECT u.id, u.username, u.display_name, u.role, u.active, u.created_at, u.player_id, p.jersey, p.active AS player_active, p.can_register_payments,
   p.first_name || ' ' || p.last_name AS player_name FROM users u LEFT JOIN players p ON p.id = u.player_id ORDER BY u.id`));
 POST('/api/users', 'admin', async ({ user, body }) => {
   const username = validUsername(body.username);
@@ -423,6 +463,7 @@ async function handle(request, { ip = '' } = {}) {
     if (r.level !== 'public' && !user) return json({ error: 'Du måste logga in.' }, 401);
     if (r.level === 'admin' && user.role !== 'admin') return json({ error: user.role === 'player' ? 'Spelarkonton kan läsa och anmäla böter men inte ändra uppgifter.' : 'Du har läsbehörighet och kan inte ändra uppgifter.' }, 403);
     if (r.level === 'player' && user.role !== 'player') return json({ error: 'Det här kan bara göras med ett spelarkonto.' }, 403);
+    if (r.level === 'payments' && !canRegisterPayments(user)) return json({ error: 'Du har inte behörighet att registrera betalningar.' }, 403);
     let body = {};
     if (!['GET', 'HEAD', 'DELETE'].includes(method)) {
       const text = await request.text();

@@ -1,5 +1,5 @@
 // Formulär och detaljvyer som används från flera sidor.
-import { S, get, post, put, esc, kr, krPlain, today, monthEnd, modal, confirmDialog, toast, fail, busy, formData, statusPill, demoTag, fmtDate, fmtTs, isAdmin, uid, playerOpts, icon, juniorTag, reportPill } from './core.js';
+import { S, get, post, put, esc, kr, krPlain, today, monthEnd, modal, confirmDialog, toast, fail, busy, formData, statusPill, demoTag, fmtDate, fmtTs, isAdmin, uid, playerOpts, icon, juniorTag, reportPill, fmtSwish, copyText } from './core.js';
 import { refresh } from './app.js';
 
 const RULE_KINDS = ['no_fines', 'least_fines', 'late'];
@@ -128,7 +128,9 @@ export async function fineForm({ playerId } = {}) {
       c.innerHTML = `<span class="warn">Beloppet avviker från standard (${kr(cat.default_amount * (Number(form.quantity?.value) || 1))}). Ändringen loggas.</span>`;
     } else c.innerHTML = '';
     if (!n || !cat) { s.textContent = !n ? 'Välj minst en spelare' : 'Välj en kategori'; return; }
-    const juniors = active.filter((p) => selected.has(p.id) && p.junior_discount);
+    const juniorsAll = active.filter((p) => selected.has(p.id) && p.junior_discount);
+    const juniors = cat.junior_exempt ? [] : juniorsAll;
+    if (cat.junior_exempt && juniorsAll.length && a) c.innerHTML += `<p class="jr-note">${icon('info')} Juniorrabatt gäller inte ${esc(cat.name)} – ${juniorsAll.map((p) => esc(p.name)).join(', ')} betalar fullt belopp ${kr(a)}.</p>`;
     if (juniors.length && a) c.innerHTML += `<p class="jr-note">${icon('star')} Juniorrabatt dras automatiskt: ${juniors.map((p) => `${esc(p.name)} betalar ${kr(a - Math.floor((a * p.junior_discount) / 100))} (ord. ${kr(a)} − ${kr(Math.floor((a * p.junior_discount) / 100))})`).join(', ')}.</p>`;
     const total = a ? [...selected].reduce((sum, id) => { const p = active.find((x) => x.id === id); return sum + a - (p?.junior_discount ? Math.floor((a * p.junior_discount) / 100) : 0); }, 0) : 0;
     s.innerHTML = a ? `${n} ${n === 1 ? 'bot' : 'böter'} × ${kr(a)}${juniors.length ? ' (minus juniorrabatt)' : ''} = <b>${kr(total)}</b>` : 'Komplettera uppgifterna';
@@ -316,6 +318,7 @@ export async function fineDetail(id) {
     title: `Bot ${f.fine_no}`, wide: true,
     body: `<div class="detail-head"><div><div class="big-no">${esc(f.fine_no)} ${demoTag(f.is_demo)}</div><a href="#/spelare/${esc(f.player_id)}" data-c>${esc(f.player_name)}</a></div>
       <div class="r"><div class="big-amt">${kr(f.amount)}</div>${statusPill(f.status)}</div></div>
+      ${f.junior_exempt ? `<div class="breakdown"><div><small>Ordinarie bot</small><b>${kr(f.base_amount ?? f.amount)}</b></div><div><small>Juniorrabatt</small><b>0 kr</b><small class="muted">gäller inte ${esc(f.category_name)}</small></div><div><small>Att betala</small><b>${kr(f.amount)}</b></div></div>` : ''}
       ${f.discount_amount > 0 ? `<div class="breakdown"><div><small>Ordinarie bot</small><b>${kr(f.base_amount)}</b></div><div><small>Juniorrabatt ${f.discount_pct} %</small><b class="pos">−${kr(f.discount_amount)}</b></div><div><small>Att betala</small><b>${kr(f.amount)}</b></div></div>` : ''}
       <dl class="dl">
         ${d.report ? `<dt>Från anmälan</dt><dd><b>${esc(d.report.report_no)}</b> av ${d.report.reporter_jersey ? `#${esc(d.report.reporter_jersey)} ` : ''}${esc(d.report.reporter_name)} · händelse ${fmtDate(d.report.incident_date)}${d.report.comment ? `<br><small class="muted">"${esc(d.report.comment)}"</small>` : ''}<br><small class="muted">Godkänd ${d.report.approved_by_player ? 'av den anmälde själv' : `av ${esc(d.report.decided_by)}`}${d.report.dispute_reason ? ` efter bestridande: ${esc(d.report.dispute_reason)}` : ''}</small></dd>` : ''}
@@ -495,29 +498,36 @@ export async function reportForm({ playerId } = {}) {
 }
 
 // Beslut om en anmälan. kind: accept | dispute | approve | reject
-export async function decideReport(r, kind) {
-  const amountTxt = `${r.category_number}. ${esc(r.category_name)} – ${kr(r.amount)}`;
+// Varje beslut gäller exakt en anmälan: id + anmälningsnummer + den status som visades skickas med,
+// och servern vägrar om något inte stämmer. Kortets knappar låses medan anropet pågår.
+const deciding = new Set();
+export async function decideReport(r, kind, card) {
+  if (deciding.has(r.id)) return;
+  const amountTxt = `<b>${esc(r.report_no)}</b> (${esc(r.player_name)}): ${r.category_number}. ${esc(r.category_name)} – ${kr(r.amount)}`;
+  const expect = { report_no: r.report_no, status: r.status };
+  const lock = (on) => { card?.querySelectorAll('button').forEach((b) => { b.disabled = on; }); card?.classList.toggle('rep-busy', on); };
+  const send = async (path, body) => { deciding.add(r.id); lock(true); try { return await post(path, { ...body, expect }); } finally { deciding.delete(r.id); } };
   const jr = r.junior_discount ? ` Juniorrabatt ${r.junior_discount} % dras när boten blir officiell.` : '';
   try {
     if (kind === 'accept') {
-      const ok = await confirmDialog({ title: `Godkänn ${r.report_no}?`, text: `Du godkänner boten ${amountTxt}. Den blir en officiell bot med eget bötesnummer och läggs till din skuld.${jr}`, confirm: 'Godkänn boten', danger: false });
+      const ok = await confirmDialog({ title: `Godkänn ${r.report_no}?`, text: `Du godkänner endast ${amountTxt}. Den blir en officiell bot med eget bötesnummer och läggs till din skuld. Övriga anmälningar påverkas inte.${jr}`, confirm: 'Godkänn boten', danger: false });
       if (!ok) return;
-      const x = await post(`/api/reports/${r.id}/accept`); toast(`Godkänd – ${x.fine_no} registrerad.`);
+      const x = await send(`/api/reports/${r.id}/accept`); toast(`${r.report_no} godkänd – ${x.fine_no} registrerad.`);
     } else if (kind === 'dispute') {
       const reason = await confirmDialog({ title: `Bestrid ${r.report_no}?`, text: `Anmälan (${amountTxt}) skickas till administratören som avgör. Den påverkar inte din skuld så länge den inte är godkänd.`, confirm: 'Bestrid', reason: true, reasonLabel: 'Varför bestrider du? (obligatoriskt)' });
       if (!reason) return;
-      await post(`/api/reports/${r.id}/dispute`, { reason }); toast('Anmälan bestriden – administratören avgör.');
+      await send(`/api/reports/${r.id}/dispute`, { reason }); toast(`${r.report_no} bestriden – administratören avgör.`);
     } else if (kind === 'approve') {
-      const ok = await confirmDialog({ title: `Godkänn ${r.report_no}?`, text: `${esc(r.player_name)} får boten ${amountTxt}. Den blir en officiell bot med eget bötesnummer.${jr}`, confirm: 'Godkänn', danger: false });
+      const ok = await confirmDialog({ title: `Godkänn ${r.report_no}?`, text: `Endast ${amountTxt} godkänns och blir en officiell bot med eget bötesnummer. Övriga anmälningar påverkas inte.${jr}`, confirm: 'Godkänn', danger: false });
       if (!ok) return;
-      const x = await post(`/api/reports/${r.id}/approve`); toast(`Godkänd – ${x.fine_no} registrerad.`);
+      const x = await send(`/api/reports/${r.id}/approve`); toast(`${r.report_no} godkänd – ${x.fine_no} registrerad.`);
     } else if (kind === 'reject') {
       const reason = await confirmDialog({ title: `Avslå ${r.report_no}?`, text: 'Anmälan avslås och blir ingen bot. Den finns kvar i historiken.', confirm: 'Avslå', reason: true });
       if (!reason) return;
-      await post(`/api/reports/${r.id}/reject`, { reason }); toast('Anmälan avslagen.');
+      await send(`/api/reports/${r.id}/reject`, { reason }); toast(`${r.report_no} avslagen.`);
     }
     refresh();
-  } catch (err) { fail(err); refresh(); }
+  } catch (err) { lock(false); fail(err); refresh(); }
 }
 
 // Kort för en anmälan (används på sidan Anmälningar och på spelarprofilen)
@@ -527,7 +537,7 @@ export function reportCard(r) {
   const actions = [];
   if (mine && r.status === 'pending') actions.push(`<button class="btn small ghost" data-rep="dispute" data-rid="${r.id}">Bestrid</button><button class="btn small primary" data-rep="accept" data-rid="${r.id}">${icon('check')} Godkänn</button>`);
   if (admin && ['pending', 'disputed'].includes(r.status)) actions.push(`<button class="btn small danger ghost" data-rep="reject" data-rid="${r.id}">Avslå</button><button class="btn small primary" data-rep="approve" data-rid="${r.id}">${icon('check')} Godkänn</button>`);
-  return `<article class="rep rep-${r.status}">
+  return `<article class="rep rep-${r.status}" data-report="${r.id}" data-report-no="${esc(r.report_no)}" data-status="${r.status}">
     <header><span class="rep-no">${esc(r.report_no)}</span>${reportPill(r.status)}<span class="rep-date muted small">${fmtTs(r.created_at)}</span></header>
     <div class="rep-main"><div><a href="#/spelare/${esc(r.player_id)}" class="rep-who">${r.player_jersey ? `<em>#${esc(r.player_jersey)}</em> ` : ''}${esc(r.player_name)}</a>${juniorTag(r)}
       <p><span class="catno">${r.category_number}</span> ${esc(r.category_name)}${r.quantity > 1 ? ` × ${r.quantity}` : ''} · händelse ${fmtDate(r.incident_date)}</p>
@@ -557,4 +567,94 @@ export function accountForm(p) {
       try { const r = await post(`/api/players/${encodeURIComponent(p.id)}/account`, formData(e.target)); toast(`Konto skapat – inloggning med nummer ${r.login}.`); close(); refresh(); } catch (err) { fail(err); }
     });
   };
+}
+
+// ---------- Swish: betala sin skuld ----------
+let swishState = null;
+// Anropas av sidan efter att kortet ritats: QR-kod (för datorn) och kopieringsknappen.
+export function bindSwish(root) {
+  if (!swishState) return;
+  const { url, details } = swishState;
+  const box = root.querySelector('[data-swish-qr]');
+  if (box && window.qrcode) { const q = window.qrcode(0, 'M'); q.addData(url); q.make(); box.innerHTML = q.createSvgTag({ cellSize: 4, margin: 2, scalable: true }); }
+  root.querySelector('[data-swish-copy]')?.addEventListener('click', () => copyText(details, 'Betalningsuppgifterna är kopierade – klistra in i Swish eller banken.'));
+}
+// Öppnar Swish med mottagare, belopp och meddelande förifyllt (samma länk som Swish QR-koder använder).
+// Spelaren granskar och godkänner själv i Swish. Inget registreras som betalt här – kassören
+// registrerar betalningen först när pengarna har kontrollerats.
+export async function swishCard() {
+  swishState = null;
+  const s = await get('/api/me/swish');
+  if (s.amount <= 0) return `<section class="card swish-card"><header><h2>${icon('phone')} Betala med Swish</h2></header><p class="muted">Du har ingen obetald skuld just nu. 👏${s.credit ? ` Du har ${kr(s.credit)} tillgodo.` : ''}</p></section>`;
+  if (!s.configured) return `<section class="card swish-card"><header><h2>${icon('phone')} Betala din skuld</h2></header><p>Att betala: <b>${kr(s.amount)}</b>. Kassans Swish-nummer är inte inlagt ännu – fråga kassören.</p></section>`;
+  const android = /Android/i.test(navigator.userAgent);
+  const href = android ? `intent://${s.url.replace(/^https:\/\//, '')}#Intent;scheme=https;package=se.bankgirot.swish;S.browser_fallback_url=${encodeURIComponent(s.url)};end` : s.url;
+  const details = `Swish till: ${fmtSwish(s.number)}${s.name ? ` (${s.name})` : ''}\nBelopp: ${krPlain(s.amount)} kr\nMeddelande: ${s.message}`;
+  swishState = { url: s.url, details };
+  return `<section class="card swish-card" data-swish>
+    <header><h2>${icon('phone')} Betala din skuld</h2><span class="pill amber">Obetalt ${kr(s.amount)}</span></header>
+    <div class="swish-grid">
+      <div>
+        <dl class="swish-dl">
+          <dt>Mottagare</dt><dd><b>${esc(fmtSwish(s.number))}</b>${s.name ? `<br><small class="muted">${esc(s.name)}</small>` : ''}</dd>
+          <dt>Belopp</dt><dd><b class="swish-amt">${kr(s.amount)}</b></dd>
+          <dt>Meddelande</dt><dd><code>${esc(s.message)}</code><br><small class="muted">Kopplar betalningen till dig – ändra inte.</small></dd>
+        </dl>
+        <div class="swish-btns">
+          <a class="btn primary swish-btn" href="${esc(href)}" rel="noopener">${icon('phone')} Betala din skuld med Swish</a>
+          <button type="button" class="btn ghost" data-swish-copy>${icon('copy')} Kopiera betalningsuppgifter</button>
+        </div>
+      </div>
+      <figure class="swish-qr"><div data-swish-qr aria-label="QR-kod för Swish"></div><figcaption>På datorn: skanna med Swish-appen</figcaption></figure>
+    </div>
+    <p class="swish-note">${icon('shield')} <span>Kontrollera mottagare, belopp och meddelande i Swish innan du godkänner. Skulden markeras som betald först när kassören har <b>kontrollerat att pengarna kommit in</b> – inte när du trycker på knappen. Öppnas inte Swish eller saknas uppgifterna: kopiera dem och betala manuellt i appen.</span></p>
+  </section>`;
+}
+
+// ---------- Registrera verifierad betalning (kassabehörighet) ----------
+const swishRef = (p) => `Böter ${p.id}`;
+export function verifiedPaymentForm(p, mode, onDone) {
+  const key = uid(); const t = today();
+  const full = mode === 'full';
+  const { el, close } = modal({
+    title: `${full ? 'Hela skulden' : 'Delbetalning'} – ${p.name}`,
+    body: `<form novalidate>
+      <div class="mini-kpis"><div><small>Skuld</small><b class="neg">${kr(p.debt)}</b></div><div><small>Obetalda böter</small><b>${p.unpaid_count}</b></div><div><small>Försenat</small><b class="${p.overdue_amount ? 'warn' : ''}">${kr(p.overdue_amount)}</b></div><div><small>Swish-meddelande</small><b class="small-b">${esc(swishRef(p))}…</b></div></div>
+      <div class="grid3">
+        <label class="field"><span>Belopp (kr)</span><input name="amount" inputmode="decimal" required value="${full ? krPlain(p.debt) : ''}" ${full ? 'readonly' : 'autofocus'} placeholder="max ${krPlain(p.debt)}"></label>
+        <label class="field"><span>Datum pengarna kom in</span><input type="date" name="date" value="${t}" max="${t}" required></label>
+        <label class="field"><span>Betalningssätt</span><select name="method"><option>Swish</option><option>Banköverföring</option><option>Kontant</option></select></label>
+      </div>
+      <label class="field"><span>Referens (t.ex. Swish-meddelande eller transaktion)</span><input name="reference" maxlength="120" placeholder="${esc(swishRef(p))} …"></label>
+      <div class="calc" data-alloc></div>
+      <label class="verify-check"><input type="checkbox" name="verified" required><span><b>Jag har kontrollerat att pengarna har kommit in</b> (i Swish, på kontot eller kontant i handen).</span></label>
+      <div class="actions"><button type="button" class="btn ghost" data-c>Avbryt</button><button class="btn primary" disabled>${icon('shield')} Registrera betalning</button></div>
+    </form>`,
+  });
+  const form = el.querySelector('form'); const btn = form.querySelector('.primary');
+  el.querySelector('[data-c]').onclick = close;
+  const parse = (v) => { const x = String(v || '').replace(/\s/g, '').replace(',', '.'); return /^\d+(\.\d{1,2})?$/.test(x) ? Math.round(parseFloat(x) * 100) : null; };
+  const preview = () => {
+    const a = parse(form.amount.value); const box = el.querySelector('[data-alloc]');
+    btn.disabled = !form.verified.checked || !a || a > p.debt;
+    if (!a) { box.innerHTML = ''; return; }
+    if (a > p.debt) { box.innerHTML = `<span class="neg">Beloppet är större än skulden (${kr(p.debt)}). Överskott hanteras av administratören.</span>`; return; }
+    let left = a; const parts = [];
+    for (const f of p.fines) { if (left <= 0) break; const x = Math.min(left, f.remaining); parts.push(`${esc(f.fine_no)} ${x === f.remaining ? 'betald' : `${kr(x)} av ${kr(f.remaining)}`}`); left -= x; }
+    box.innerHTML = `Fördelas mot äldsta böterna först: ${parts.join(' · ')}. Kvar att betala efteråt: <b>${kr(p.debt - a)}</b>.`;
+  };
+  form.addEventListener('input', preview); form.addEventListener('change', preview); preview();
+  const send = async (confirmDup) => {
+    const d = formData(form);
+    try {
+      const r = await post('/api/verify/payments', { player_id: p.id, amount: d.amount, date: d.date, method: d.method, reference: d.reference, verified: form.verified.checked, mode, idempotency_key: key, confirm_duplicate: confirmDup });
+      toast(`${r.payment_no} registrerad för ${p.name} (${kr(r.allocated)}).`); close(); onDone?.();
+    } catch (err) {
+      if (err.code === 'possible_duplicate') {
+        const ok = await confirmDialog({ title: 'Möjlig dubblett', text: esc(err.message), confirm: 'Ja, det är en ny betalning', danger: false });
+        if (ok) await send(true);
+      } else if (err.code === 'already_registered') { toast(err.message); close(); onDone?.(); } else fail(err);
+    }
+  };
+  form.onsubmit = (e) => { e.preventDefault(); if (!form.verified.checked) return toast('Bekräfta att pengarna har kommit in.', 'err'); busy(btn, () => send(false)); };
 }

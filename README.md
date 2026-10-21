@@ -67,6 +67,27 @@ Kortkommandon: **N** = ny bot, **B** = ny inbetalning.
 - Rabatten räknas en gång per bot. Ändras beloppet i efterhand anges ordinarie belopp och samma procentsats räknas om.
 - Skuld, betalningar, kassa, leaderboard och export räknar med beloppet att betala. Befintliga böter ändras aldrig när rabatten slås på eller av.
 
+## Swish – betala sin skuld
+
+- Administratören anger kassans Swish-nummer och mottagarnamn under **Inställningar → Allmänt**.
+- På spelarens egen sida finns **Betala din skuld med Swish**. Knappen öppnar Swish med mottagare, belopp (aktuell skuld) och meddelandet `Böter S-xxx nr NN Förnamn Efternamn` förifyllt. Det är samma länkformat som Swish egna QR-koder använder (`https://app.swish.nu/1/p/sw/?sw=…&amt=…&cur=SEK&msg=…`). På Android används en intent-länk direkt till Swish-appen, och på datorn visas en QR-kod att skanna.
+- **Kopiera betalningsuppgifter** är reservlösningen om Swish inte öppnas.
+- Spelaren granskar och godkänner alltid själv i Swish. **Ingenting markeras som betalt** av knappen. Betalningen registreras först när kassören har kontrollerat att pengarna kommit in. Privata Swish-nummer har inget API som kan bekräfta betalningar automatiskt – det kräver Swish Handel (företags-/föreningsavtal via bank och certifikat).
+
+## Kassabehörighet (t.ex. Johannes)
+
+- Administratören slår på **Kassabehörighet** på spelarens sida. Den är kopplad till spelar-ID, inte tröjnummer, och kan återkallas när som helst.
+- Spelaren får sidan **Registrera betalningar**: obetalda skulder, knapparna *Hela skulden* och *Delbetalning*. Kryssrutan "Jag har kontrollerat att pengarna har kommit in" krävs. Beloppet får inte överstiga skulden. Egen betalning kan inte registreras.
+- Varje registrering sparar vem (`#2 Johannes …`), belopp och tidpunkt, och loggas. Endast administratören kan återföra eller korrigera betalningar. Kassabehörigheten ger ingen rätt att ändra böter, rabatter, inställningar eller behörigheter – det kontrolleras i servern.
+
+## Juniorrabatt – undantag
+
+Böteskategorier markerade `junior_exempt` (Avslagen klubba) ger aldrig juniorrabatt, varken vid direktregistrering eller godkänd anmälan. Regeln finns på ett ställe (`juniorDiscount` i `server/ops.js`). Historiska böter ändras inte.
+
+## Anmälningar – ett beslut per anmälan
+
+Varje beslut skickar anmälans id, anmälningsnummer och den status som visades. Servern ändrar bara den raden och vägrar om något inte stämmer. Databasen stoppar att en anmälan ger mer än en bot (unikt `report_id`) och att en avgjord anmälan byter status (trigger `fine_reports_guard`).
+
 ## Hur reglerna fungerar
 
 - **Sista betalningsdag** = sista kalenderdagen i den månad boten utfärdades (kan ändras per bot).

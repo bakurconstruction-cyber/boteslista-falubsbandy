@@ -237,6 +237,9 @@ export async function settings(el) {
     body.innerHTML = `<form class="card form-card" data-gen>
       <label class="field"><span>Lagets namn</span><input name="team_name" value="${esc(s.team_name)}" required maxlength="80"></label>
       <label class="field"><span>Betalningsinformation (visas i påminnelser)</span><input name="payment_info" value="${esc(s.payment_info)}" required maxlength="300"></label>
+      <div class="grid2"><label class="field"><span>Swish-nummer som spelarna betalar till</span><input name="swish_number" value="${esc(s.swish_number)}" inputmode="tel" placeholder="070-123 45 67 eller 123 456 78 90"></label>
+      <label class="field"><span>Mottagarens namn (visas för spelarna)</span><input name="swish_name" value="${esc(s.swish_name)}" maxlength="50" placeholder="t.ex. Johannes – kassör"></label></div>
+      <p class="muted small">Används av knappen "Betala din skuld med Swish". Swish öppnas med numret, beloppet och ett meddelande som identifierar spelaren förifyllda – spelaren godkänner själv i Swish. Betalningar registreras ändå först när de kontrollerats.</p>
       <label class="field"><span>Startsaldo i kassan (kr)</span><input name="start_balance" inputmode="decimal" value="${krPlain(s.start_balance)}"></label>
       <div class="actions"><button class="btn primary">Spara</button></div></form>
       <form class="card form-card" data-season><h3>Säsong ${esc(s.season.name)}</h3><div class="grid2">
@@ -281,7 +284,7 @@ export async function settings(el) {
     body.innerHTML = `<section class="card"><header><h2>Spelarkonton</h2><span class="muted small">${accounts.size} av ${real.filter((p) => p.active).length} aktiva spelare har konto</span></header>
       <p class="muted small">Spelare loggar in med sitt <b>tröjnummer</b> och ett eget lösenord. De kan läsa leaderboard och böteshistorik och anmäla böter – inte ändra böter, betalningar, saldon eller konton. Behörigheterna kontrolleras i servern.</p>
       <div class="tbl-wrap"><table class="tbl"><thead><tr><th>#</th><th>Spelare</th><th>Konto</th><th></th></tr></thead><tbody>
-      ${real.map((p) => { const u = accounts.get(p.id); return `<tr class="${p.active ? '' : 'dim'}" ${u ? `data-uid="${u.id}"` : ''} data-pid="${esc(p.id)}"><td class="jersey">${esc(p.jersey || '–')}</td><td><b>${esc(p.name)}</b> ${juniorTag(p)}${p.active ? '' : ' <span class="pill grey">Inaktiv</span>'}</td>
+      ${real.map((p) => { const u = accounts.get(p.id); return `<tr class="${p.active ? '' : 'dim'}" ${u ? `data-uid="${u.id}"` : ''} data-pid="${esc(p.id)}"><td class="jersey">${esc(p.jersey || '–')}</td><td><b>${esc(p.name)}</b> ${juniorTag(p)}${p.can_register_payments ? ' <span class="pill ice">Kassabehörighet</span>' : ''}${p.active ? '' : ' <span class="pill grey">Inaktiv</span>'}</td>
         <td>${u ? (u.active ? `<span class="pill green">Aktivt</span> <small class="muted">loggar in med ${esc(p.jersey)}</small>` : '<span class="pill grey">Avstängt</span>') : '<span class="muted small">Inget konto</span>'}</td>
         <td class="r">${u ? `<button class="btn tiny ghost" data-pw>Nytt lösenord</button> <button class="btn tiny ghost" data-toggle>${u.active ? 'Stäng av' : 'Aktivera'}</button>` : p.active ? `<button class="btn tiny ghost" data-newacc ${p.jersey ? '' : 'disabled title="Lägg till tröjnummer först"'}>${icon('plus')} Skapa konto</button>` : ''}</td></tr>`; }).join('') || '<tr><td colspan="4" class="muted">Inga spelare ännu.</td></tr>'}</tbody></table></div></section>
       <h3>Administratörer och läskonton</h3>

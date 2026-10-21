@@ -5,7 +5,7 @@
   "main": "server/app.js",
   "scripts": {
     "start": "node server/local.js",
-    "test": "node --test test/flows.test.js test/accounts.test.js",
+    "test": "node --test test/flows.test.js test/accounts.test.js test/swish-kassor.test.js",
     "bundle": "node scripts/bundle-function.mjs"
   },
   "license": "UNLICENSED",
