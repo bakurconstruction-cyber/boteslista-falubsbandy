@@ -97,10 +97,12 @@ test('1+2. Swish: förifylld länk och uppgifter – ingenting markeras som beta
   assert.equal((await api('GET', '/api/settings', null, { as: viggo })).swish_number, '0701234567');
   const debtBefore = (await player(VIGGO)).debt;
   const paysBefore = (await payments()).length;
+  await api('PUT', '/api/settings', { active_month: '2026-10' });
   s = await api('GET', '/api/me/swish', null, { as: viggo });
   assert.equal(s.configured, true); assert.equal(s.number, '0701234567'); assert.equal(s.name, 'Kassören Falu BS');
   assert.equal(s.amount, debtBefore);
-  assert.match(s.message, new RegExp(`^Böter ${VIGGO} nr 10 Viggo Lund$`));
+  // Meddelandet är "Böter [Aktiv månad]" (ändrat nov 2026 – tidigare "Böter S-xxx nr NN Namn").
+  assert.equal(s.message, 'Böter Oktober');
   assert.ok(s.message.length <= 50);
   const u = new URL(s.url);
   assert.equal(u.origin + u.pathname, 'https://app.swish.nu/1/p/sw/');

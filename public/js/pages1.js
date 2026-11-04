@@ -1,11 +1,10 @@
 // Sidor: Översikt, Spelare, Spelarprofil, Böter, Inbetalningar
-import { S, get, post, del, esc, kr, num, fmtDate, monthName, statusPill, demoTag, placeBadge, icon, isAdmin, isPlayer, canPay, barChart, empty, confirmDialog, toast, fail, copyText, reminderText, playerOpts, fineAmt, juniorTag } from './core.js';
-import { fineForm, paymentForm, playerForm, importForm, fineDetail, paymentDetail, cashForm, reportForm, reportCard, decideReport, accountForm, swishCard, bindSwish } from './forms.js';
-import { refresh } from './app.js';
+import { S, get, post, put, del, esc, kr, num, fmtDate, monthName, statusPill, demoTag, placeBadge, icon, isAdmin, isPlayer, canPay, barChart, empty, confirmDialog, toast, fail, copyText, reminderText, playerOpts, fineAmt, juniorTag } from './core.js';
+import { fineForm, paymentForm, playerForm, importForm, fineDetail, paymentDetail, cashForm, reportForm, reportCard, decideReport, accountForm, swishCard, bindSwish, rule22AllFlow } from './forms.js';
+import { refresh, loadSettings } from './app.js';
 
 const kpi = (label, value, { cls = '', sub = '', href = '' } = {}) =>
   `<${href ? `a href="${href}"` : 'div'} class="kpi ${cls}"><small>${label}</small><b>${value}</b>${sub ? `<span>${sub}</span>` : ''}</${href ? 'a' : 'div'}>`;
-const names = (arr, f) => (arr.length ? arr.map((x) => `<a href="#/spelare/${esc(x.id)}">${esc(x.name)}</a>`).join(', ') + (f ? ` <small>${f(arr[0])}</small>` : '') : '<span class="muted">–</span>');
 
 // ---------- Översikt ----------
 async function playerDebtNotice() {
@@ -15,53 +14,50 @@ async function playerDebtNotice() {
 export async function dashboard(el) {
   const d = await get('/api/dashboard');
   const admin = isAdmin();
-  el.innerHTML = `
-  <div class="page-h"><div><h1>Översikt</h1><p class="muted">Säsong ${esc(d.season.name)} · ${monthName(d.month)}</p></div>
-    ${admin ? `<div class="btns"><button class="btn primary" data-act="fine">${icon('plus')} Ny bot</button><button class="btn ghost" data-act="pay">${icon('coin')} Inbetalning</button></div>` : isPlayer() ? `<div class="btns"><button class="btn primary" data-act="report">${icon('flag')} Anmäl bot</button><a class="btn ghost" href="#/spelare/${esc(S.me.player_id)}">Min sida</a></div>` : ''}</div>
+  const am = d.active_month;
+  const months = S.settings.season_months || [am];
+  // Tre stora kort: allt hämtas från databasen via /api/dashboard.
+  const hero = (cls, ic, label, value, sub, href, extra = '') => `<${href ? `a href="${href}"` : 'div'} class="hero-card ${cls}">
+      <span class="hero-ic">${icon(ic)}</span><small>${label}</small><b>${value}</b><span class="hero-sub">${sub}</span>${extra}</${href ? 'a' : 'div'}>`;
+  const monthPicker = admin ? `<label class="hero-month" title="Byt aktiv månad"><span class="sr-only">Aktiv månad</span><select data-active-month>${months.map((m) => `<option value="${m}" ${m === am ? 'selected' : ''}>${monthName(m)}</option>`).join('')}</select></label>` : '';
+  el.innerHTML = `<div class="dash">
+  <div class="dash-h"><h1>Översikt</h1><p class="muted">Säsong ${esc(d.season.name)} · aktiv månad <b class="am-chip">${esc(d.active_month_name)}</b></p></div>
+    ${admin ? `<div class="btns dash-actions"><button class="btn primary" data-act="fine">${icon('plus')} Ny bot</button><button class="btn ghost" data-act="pay">${icon('coin')} Inbetalning</button><button class="btn ghost" data-act="r22all">${icon('check')} Registrera 2 veckor utan böter</button></div>`
+    : isPlayer() ? `<div class="btns dash-actions"><button class="btn primary" data-act="report">${icon('flag')} Anmäl bot</button><a class="btn ghost" href="#/spelare/${esc(S.me.player_id)}">Min sida</a></div>` : ''}
+  <section class="hero" aria-label="Böteskassan i siffror">
+    ${hero('h-cash', 'wallet', 'Total kassa', kr(d.cash.balance), 'Pengar som faktiskt finns i kassan', '#/kassa')}
+    ${hero('h-unpaid', 'alert', 'Obetalda böter', kr(d.unpaid_fines.amount), d.unpaid_fines.count ? `${num(d.unpaid_fines.count)} ${d.unpaid_fines.count === 1 ? 'obetald bot' : 'obetalda böter'} · ${d.unpaid_fines.players} ${d.unpaid_fines.players === 1 ? 'spelare' : 'spelare'}` : 'Alla böter är betalda 👏', '#/manad')}
+    ${hero('h-month', 'calendar', `Böter ${esc(d.active_month_name)}`, kr(d.active_month_fines.amount), `${num(d.active_month_fines.count)} ${d.active_month_fines.count === 1 ? 'registrerad bot' : 'registrerade böter'} i ${esc(monthName(am))}`, admin ? '' : '#/boter', monthPicker)}
+  </section>
+  <div class="dash-rest">
   ${isPlayer() ? await playerDebtNotice() : ''}
   ${!isAdmin() && canPay() ? `<div class="notice">${icon('shield')}<div><b>Du har kassabehörighet.</b> Registrera betalningar som har kommit in.</div><a class="btn small ghost" href="#/registrera-betalning">Registrera betalningar</a></div>` : ''}
   ${d.reports.todo ? `<div class="notice warn-notice">${icon('flag')}<div>${admin ? `<b>${d.reports.todo} ${d.reports.todo === 1 ? 'anmälan' : 'anmälningar'} att hantera</b>${d.reports.disputed ? ` – varav ${d.reports.disputed} bestridda` : ''}.` : `<b>Du har ${d.reports.todo} ${d.reports.todo === 1 ? 'anmälan' : 'anmälningar'} att svara på.</b> Godkänn eller bestrid.`}</div><a class="btn small primary" href="#/anmalningar">Visa</a></div>` : ''}
   ${!d.players_total && admin ? `<div class="notice">${icon('info')}<div><b>Kom igång:</b> lägg till lagets spelare under <a href="#/spelare">Spelare</a> (en i taget eller via CSV-import). Böteslistan 2026/2027 är redan inlagd.</div></div>` : ''}
-  <section class="kpis">
-    ${kpi('Utfärdade böter', kr(d.fines_amount), { sub: `${num(d.fines_count)} st${d.fines_voided ? ` · ${d.fines_voided} makulerade` : ''}`, href: '#/boter', cls: 'accent' })}
-    ${kpi('Inbetalt', kr(d.paid_in), { cls: 'pos', href: '#/betalningar' })}
-    ${kpi('Obetalt', kr(d.unpaid), { cls: d.unpaid ? 'neg' : '', sub: `${d.players_with_debt} spelare med skuld`, href: '#/manad' })}
-    ${kpi('Försenade', num(d.overdue_count), { cls: d.overdue_count ? 'warn' : '', sub: d.overdue_count ? `${kr(d.overdue_amount)} förfallet` : 'inga förfallna böter', href: '#/manad' })}
-    ${kpi('Kassans saldo', kr(d.cash.balance), { cls: 'ice', sub: 'faktiska pengar', href: '#/kassa' })}
-    ${kpi('Spelare', num(d.players_active), { sub: `${d.players_total} totalt`, href: '#/spelare' })}
-  </section>
-  <section class="facts">
-    <div><small>Månadens största botbetalare</small><p>${names(d.month_top_payer, (x) => kr(x.amount))}</p></div>
-    <div><small>Flest böter</small><p>${names(d.most_fines, (x) => `${x.fine_count} st`)}</p></div>
-    <div><small>Minst böter</small><p>${names(d.least_fines, (x) => `${x.fine_count} st`)}</p></div>
-  </section>
-  <div class="cols">
-    <section class="card span2"><header><h2>Böter och inbetalningar per månad</h2></header>
-      ${barChart(d.chart, [{ key: 'fines', label: 'Utfärdade böter', cls: 's-fine' }, { key: 'payments', label: 'Inbetalningar', cls: 's-pay' }])}</section>
-    <section class="card"><header><h2>Böteskassan</h2><a href="#/kassa" class="link">Kassa →</a></header>
-      <dl class="ledger">
-        <dt>Startsaldo</dt><dd>${kr(d.cash.start_balance)}</dd>
-        <dt>+ Inbetalningar</dt><dd class="pos">${kr(d.cash.received)}</dd>
-        <dt>+ Övriga inkomster</dt><dd class="pos">${kr(d.cash.income)}</dd>
-        <dt>− Återbetalningar</dt><dd class="neg">${kr(d.cash.refunds)}</dd>
-        <dt>− Utgifter</dt><dd class="neg">${kr(d.cash.expenses)}</dd>
-        <dt class="tot">Saldo i kassan</dt><dd class="tot">${kr(d.cash.balance)}</dd>
-      </dl>
-      <p class="muted small">Obetalda böter (${kr(d.unpaid)}) räknas inte som pengar i kassan förrän de betalats.${d.credit_total ? ` Spelarnas tillgodohavanden: ${kr(d.credit_total)}.` : ''}</p></section>
-  </div>
-  <div class="cols">
-    <section class="card"><header><h2>Leaderboard</h2><a href="#/leaderboard" class="link">Alla →</a></header>
-      ${d.leaderboard.length ? `<ol class="lb">${d.leaderboard.map((p) => `<li><a href="#/spelare/${esc(p.id)}">${placeBadge(p.place)}<span class="nm"><span>${esc(p.name)}</span>${demoTag(p.is_demo)}</span><span class="muted">${p.fine_count} st</span><b>${kr(p.issued)}</b></a></li>`).join('')}</ol>` : empty('Inga spelare ännu.')}</section>
-    <section class="card"><header><h2>Senaste böter</h2><a href="#/boter" class="link">Register →</a></header>
-      ${d.recent_fines.length ? `<ul class="feed">${d.recent_fines.map((f) => `<li data-fine="${f.id}"><span class="no">${esc(f.fine_no)}</span><span class="tx"><b>${esc(f.player_name)}</b><small>${esc(f.category_name)} · ${fmtDate(f.issued_date)}</small></span><span class="am">${kr(f.amount)}${f.discount_amount ? '<small class="jr">junior</small>' : ''}${statusPill(f.status)}</span></li>`).join('')}</ul>` : empty('Inga böter registrerade ännu.')}</section>
-    <section class="card"><header><h2>Senaste inbetalningar</h2><a href="#/betalningar" class="link">Alla →</a></header>
-      ${d.recent_payments.length ? `<ul class="feed">${d.recent_payments.map((p) => `<li data-pay="${p.id}"><span class="no">${esc(p.payment_no)}</span><span class="tx"><b>${esc(p.player_name)}</b><small>${esc(p.method)} · ${fmtDate(p.date)}</small></span><span class="am ${p.reversed ? 'struck' : 'pos'}">${kr(p.amount)}</span></li>`).join('')}</ul>` : empty('Inga inbetalningar ännu.')}</section>
-  </div>`;
+  <div class="cols dash-cols">
+    <section class="card"><header><h2>Senaste böter</h2><a href="#/boter" class="link">Alla →</a></header>
+      ${d.recent_fines.length ? `<ul class="feed">${d.recent_fines.slice(0, 6).map((f) => `<li data-fine="${f.id}"><span class="no">${esc(f.fine_no)}</span><span class="tx"><b>${esc(f.player_name)}</b><small>${esc(f.category_name)} · ${fmtDate(f.issued_date)}</small></span><span class="am">${kr(f.amount)}${f.discount_amount ? '<small class="jr">junior</small>' : ''}${statusPill(f.status)}</span></li>`).join('')}</ul>` : empty('Inga böter registrerade ännu.')}</section>
+    <section class="card"><header><h2>Senaste betalningar</h2><a href="#/betalningar" class="link">Alla →</a></header>
+      ${d.recent_payments.length ? `<ul class="feed">${d.recent_payments.slice(0, 6).map((p) => `<li data-pay="${p.id}"><span class="no">${esc(p.payment_no)}</span><span class="tx"><b>${esc(p.player_name)}</b><small>${esc(p.method)} · ${fmtDate(p.date)}</small></span><span class="am ${p.reversed ? 'struck' : 'pos'}">${kr(p.amount)}</span></li>`).join('')}</ul>` : empty('Inga betalningar ännu.')}</section>
+    <section class="card"><header><h2>Obetalda böter</h2><a href="#/manad" class="link">Månadsskifte →</a></header>
+      ${d.debtors.length ? `<ul class="feed debtors">${d.debtors.slice(0, 8).map((p) => `<li data-player="${esc(p.id)}"><span class="jno-badge">${esc(p.jersey || '–')}</span><span class="tx"><b>${esc(p.name)}</b>${demoTag(p.is_demo)}<small>${p.unpaid_count} ${p.unpaid_count === 1 ? 'obetald bot' : 'obetalda böter'}${p.overdue_amount ? ` · <span class="warn">${kr(p.overdue_amount)} försenat</span>` : ''}</small></span><span class="am neg">${kr(p.debt)}</span></li>`).join('')}</ul>${d.debtors.length > 8 ? `<p class="muted small more">+ ${d.debtors.length - 8} till – se Månadsskifte.</p>` : ''}` : empty('Ingen har obetalda böter. 👏')}</section>
+  </div></div></div>`;
   el.onclick = (e) => {
-    const a = e.target.closest('[data-act],[data-fine],[data-pay]'); if (!a) return;
+    const a = e.target.closest('[data-act],[data-fine],[data-pay],[data-player]'); if (!a) return;
     if (a.dataset.act === 'fine') fineForm(); else if (a.dataset.act === 'pay') paymentForm(); else if (a.dataset.act === 'report') reportForm();
+    else if (a.dataset.act === 'r22all') rule22AllFlow();
     else if (a.dataset.fine) fineDetail(a.dataset.fine); else if (a.dataset.pay) paymentDetail(a.dataset.pay);
+    else if (a.dataset.player) location.hash = `#/spelare/${a.dataset.player}`;
   };
+  el.querySelector('[data-active-month]')?.addEventListener('change', async (e) => {
+    const sel = e.target; const prev = am;
+    try {
+      await put('/api/settings', { active_month: sel.value });
+      await loadSettings();
+      toast(`Aktiv månad: ${monthName(sel.value)}. Swish-meddelandet är nu "${S.settings.swish_message}".`);
+      refresh();
+    } catch (err) { sel.value = prev; fail(err); }
+  });
 }
 
 // ---------- Spelare ----------

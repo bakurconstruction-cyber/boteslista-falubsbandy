@@ -251,7 +251,7 @@ async function insertFine(db, user, season, input, { isDemo = false, ruleKey = n
       description, quantity, amount, base_amount, discount_amount, discount_pct, report_id, ref_fine_id, rule_key, calc, registered_by, is_demo, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, no, season.id, player.id, cat.id, cat.name, cat.number, cat.kind, issued, due, description, quantity, d.final, amount, d.discount, d.pct, reportId, refId, ruleKey, calc, who(user), isDemo ? 1 : 0, now()));
   } catch (e) {
     if (e.code === '23505' && reportId) fail('Anmälan har redan blivit en bot.', 409, 'already_decided');
-    if (e.code === '23505' && ruleKey) fail(`${player.first_name} ${player.last_name} har redan fått bot nr ${cat.number} för denna period.`, 409, 'duplicate_rule');
+    if (e.code === '23505' && ruleKey && (!e.constraint || e.constraint === 'fines_rule_unique')) fail(`${player.first_name} ${player.last_name} har redan fått bot nr ${cat.number} för denna period.`, 409, 'duplicate_rule');
     throw e;
   }
   await audit(db, user, 'Bot registrerad', 'bot', no, null, { spelare: `${player.first_name} ${player.last_name}`, kategori: `${cat.number}. ${cat.name}`, belopp: kr(d.final), ...(d.discount ? { ordinarie: kr(amount), juniorrabatt: kr(d.discount) } : {}), datum: issued, förfaller: due, beskrivning: description, beräkning: calc });
@@ -538,6 +538,37 @@ async function applyRule(db, user, season, rule, body) {
   });
 }
 
+// Regel 22 för alla på en gång: "Registrera 2 veckor utan böter".
+// Använder exakt samma villkor (rule22Candidates) och samma registrering (insertFine med rule_key
+// R22:<periodstart>) som den vanliga regel 22-registreringen. Allt sker i EN transaktion: misslyckas
+// en enda spelare registreras ingen. Klienten skickar listan som administratören bekräftade; har den
+// ändrats sedan dess (någon har fått en bot eller registrerats under tiden) avbryts allt.
+async function applyRule22All(db, user, season, body) {
+  const settings = await L.getSettings(db);
+  if (settings.rule22_enabled !== '1') fail('Regel 22 är avstängd under Inställningar.');
+  const confirmed = Array.isArray(body.confirmed_player_ids) ? [...new Set(body.confirmed_player_ids.map(String))].sort() : null;
+  if (!confirmed) fail('Bekräftelsen saknas. Ladda om sidan och försök igen.');
+  return tx(async (db) => {
+    const st = await L.loadState(db, season);
+    const eligible = L.rule22Candidates(st, settings).rows.filter((r) => r.eligible);
+    if (!eligible.length) fail('Ingen spelare uppfyller kravet på två veckor utan böter just nu.', 409, 'none_eligible');
+    const now = eligible.map((r) => r.player_id).sort();
+    if (now.length !== confirmed.length || now.some((id, i) => id !== confirmed[i])) {
+      fail('Listan över kvalificerade spelare har ändrats sedan du bekräftade. Ingen registrerades – kontrollera listan och försök igen.', 409, 'list_changed');
+    }
+    const catId = (await catByNumber(db, 22)).id;
+    const out = [];
+    for (const c of eligible) {
+      const fineNo = await insertFine(db, user, season, { player_id: c.player_id, category_id: catId, issued_date: L.todayStr(), description: `Inga böter ${c.period_start} – ${c.period_end}` },
+        { ruleKey: c.rule_key, allowRuleKind: true, isDemo: !!c.is_demo });
+      const f = await db.get('SELECT amount FROM fines WHERE fine_no = ?', fineNo);
+      out.push({ fine_no: fineNo, player_id: c.player_id, name: c.name, period_start: c.period_start, period_end: c.period_end, amount: f.amount, is_demo: c.is_demo });
+    }
+    await audit(db, user, 'Regel 22 registrerad för alla kvalificerade', 'regel', '22', null, { antal: out.length, böter: out.map((r) => `${r.fine_no} ${r.name}`) });
+    return { registered: out };
+  });
+}
+
 // ---------- Månadsavstämning ----------
 async function closeMonth(db, user, season, period, body) {
   if (!L.isMonth(period)) fail('Ogiltig månad.');
@@ -575,6 +606,11 @@ async function updateSettings(db, user, body) {
     if (body.swish_name != null) next.swish_name = str(body.swish_name, 'Mottagarens namn', { max: 50 });
     if (body.start_balance != null) next.start_balance = String(parseKr(String(body.start_balance), 'Startsaldo', { allowZero: true }));
     for (const k of ['rule22_enabled', 'rule23_enabled', 'rule29_enabled']) if (body[k] != null) next[k] = body[k] ? '1' : '0';
+    if (body.active_month != null) {
+      const season = await L.activeSeason(db);
+      if (!L.isMonth(body.active_month) || !L.seasonMonthList(season).includes(body.active_month)) fail(`Aktiv månad måste vara en månad inom säsongen ${season.name}.`);
+      next.active_month = body.active_month;
+    }
     if (body.rule22_days != null) {
       const d = Number(body.rule22_days);
       if (!Number.isInteger(d) || d < 7 || d > 60) fail('Antal dagar för regel 22 måste vara 7–60.');
@@ -759,7 +795,7 @@ module.exports = {
   updatePlayer, setPlayerActive, deletePlayer, importPlayers, updateCategory, setJuniorDiscount, assertJerseyFreeForLogin,
   createReport, approveReport, disputeReport, rejectReport, getPlayer, who,
   createVerifiedPayment: (db, user, season, body) => tx(async (t) => createVerifiedPaymentTx(t, user, season, body)),
-  setPaymentPermission, swishNumber, juniorDiscount,
+  setPaymentPermission, swishNumber, juniorDiscount, applyRule22All,
   createFines, editFine, voidFine, createPayment, allocateCredit, reversePayment,
   createCashEvent, voidCashEvent, applyRule, closeMonth, updateSettings, updateSeason, seedDemo, removeDemo, playerCredit,
 };

@@ -598,7 +598,7 @@ export async function swishCard() {
         <dl class="swish-dl">
           <dt>Mottagare</dt><dd><b>${esc(fmtSwish(s.number))}</b>${s.name ? `<br><small class="muted">${esc(s.name)}</small>` : ''}</dd>
           <dt>Belopp</dt><dd><b class="swish-amt">${kr(s.amount)}</b></dd>
-          <dt>Meddelande</dt><dd><code>${esc(s.message)}</code><br><small class="muted">Kopplar betalningen till dig – ändra inte.</small></dd>
+          <dt>Meddelande</dt><dd><code>${esc(s.message)}</code><br><small class="muted">Månadens meddelande – ändra det inte.</small></dd>
         </dl>
         <div class="swish-btns">
           <a class="btn primary swish-btn" href="${esc(href)}" rel="noopener">${icon('phone')} Betala din skuld med Swish</a>
@@ -612,20 +612,21 @@ export async function swishCard() {
 }
 
 // ---------- Registrera verifierad betalning (kassabehörighet) ----------
-const swishRef = (p) => `Böter ${p.id}`;
+// Samma meddelande som spelarnas Swish-knapp använder: "Böter [Aktiv månad]".
+const swishRef = () => S.settings.swish_message || 'Böter';
 export function verifiedPaymentForm(p, mode, onDone) {
   const key = uid(); const t = today();
   const full = mode === 'full';
   const { el, close } = modal({
     title: `${full ? 'Hela skulden' : 'Delbetalning'} – ${p.name}`,
     body: `<form novalidate>
-      <div class="mini-kpis"><div><small>Skuld</small><b class="neg">${kr(p.debt)}</b></div><div><small>Obetalda böter</small><b>${p.unpaid_count}</b></div><div><small>Försenat</small><b class="${p.overdue_amount ? 'warn' : ''}">${kr(p.overdue_amount)}</b></div><div><small>Swish-meddelande</small><b class="small-b">${esc(swishRef(p))}…</b></div></div>
+      <div class="mini-kpis"><div><small>Skuld</small><b class="neg">${kr(p.debt)}</b></div><div><small>Obetalda böter</small><b>${p.unpaid_count}</b></div><div><small>Försenat</small><b class="${p.overdue_amount ? 'warn' : ''}">${kr(p.overdue_amount)}</b></div><div><small>Swish-meddelande</small><b class="small-b">${esc(swishRef(p))}</b></div></div>
       <div class="grid3">
         <label class="field"><span>Belopp (kr)</span><input name="amount" inputmode="decimal" required value="${full ? krPlain(p.debt) : ''}" ${full ? 'readonly' : 'autofocus'} placeholder="max ${krPlain(p.debt)}"></label>
         <label class="field"><span>Datum pengarna kom in</span><input type="date" name="date" value="${t}" max="${t}" required></label>
         <label class="field"><span>Betalningssätt</span><select name="method"><option>Swish</option><option>Banköverföring</option><option>Kontant</option></select></label>
       </div>
-      <label class="field"><span>Referens (t.ex. Swish-meddelande eller transaktion)</span><input name="reference" maxlength="120" placeholder="${esc(swishRef(p))} …"></label>
+      <label class="field"><span>Referens (t.ex. Swish-meddelande eller transaktion)</span><input name="reference" maxlength="120" placeholder="${esc(swishRef(p))}"></label>
       <div class="calc" data-alloc></div>
       <label class="verify-check"><input type="checkbox" name="verified" required><span><b>Jag har kontrollerat att pengarna har kommit in</b> (i Swish, på kontot eller kontant i handen).</span></label>
       <div class="actions"><button type="button" class="btn ghost" data-c>Avbryt</button><button class="btn primary" disabled>${icon('shield')} Registrera betalning</button></div>
@@ -657,4 +658,49 @@ export function verifiedPaymentForm(p, mode, onDone) {
     }
   };
   form.onsubmit = (e) => { e.preventDefault(); if (!form.verified.checked) return toast('Bekräfta att pengarna har kommit in.', 'err'); busy(btn, () => send(false)); };
+}
+
+// ---------- Regel 22: "Registrera 2 veckor utan böter" för alla kvalificerade på en gång ----------
+// Visar vilka som kvalificerar (samma villkor som regel 22 på sidan Regler), ber om bekräftelse och
+// registrerar sedan alla i en enda transaktion på servern. Visar därefter exakt vilka som registrerades.
+export async function rule22AllFlow() {
+  const d = await get('/api/rules');
+  const r22 = d.r22;
+  const info = (title, text) => { const { el, close } = modal({ title, body: `<p class="lead">${text}</p><div class="actions"><button class="btn primary" data-ok>OK</button></div>` }); el.querySelector('[data-ok]').onclick = close; };
+  if (!r22.enabled) return info('Regel 22 är avstängd', 'Slå på regeln under Inställningar → Regler för att kunna registrera.');
+  const elig = r22.rows.filter((r) => r.eligible);
+  if (!elig.length) return info('Ingen kvalificerar just nu', `Ingen aktiv spelare har haft ${r22.days} dagar i följd utan böter (räknat från senaste boten eller säsongsstart). Ingenting har registrerats.`);
+  const cat = (S.categories || await get('/api/categories')).find((c) => c.number === 22);
+  const { el, close } = modal({
+    title: 'Registrera 2 veckor utan böter', wide: true,
+    body: `<p class="lead"><b>${elig.length} ${elig.length === 1 ? 'spelare' : 'spelare'}</b> uppfyller kravet och får var sin bot nr 22 (${cat ? esc(cat.name) : 'Inga böter på 2 veckor'}${cat ? `, ${kr(cat.default_amount)}` : ''}) med eget bötesnummer.</p>
+      <div class="tbl-wrap"><table class="tbl compact"><thead><tr><th>Spelare</th><th>Senaste bot</th><th>Period utan böter</th></tr></thead><tbody>
+      ${elig.map((r) => `<tr><td><b>${esc(r.name)}</b> ${demoTag(r.is_demo)}</td><td>${fmtDate(r.last_fine)}</td><td>${fmtDate(r.period_start)} – ${fmtDate(r.period_end)}</td></tr>`).join('')}</tbody></table></div>
+      <p class="muted small">Spelare som inte uppfyller kravet registreras inte. Samma period kan aldrig registreras två gånger. Allt registreras på en gång – går något fel registreras ingen.</p>
+      <div class="actions"><button class="btn ghost" data-no>Avbryt</button><button class="btn primary" data-yes>Registrera ${elig.length} spelare</button></div>`,
+  });
+  el.querySelector('[data-no]').onclick = close;
+  el.querySelector('[data-yes]').onclick = (e) => busy(e.currentTarget, async () => {
+    try {
+      const res = await post('/api/rules/22/all', { confirmed_player_ids: elig.map((r) => r.player_id) });
+      close();
+      const reg = res.registered;
+      const total = reg.reduce((s, r) => s + r.amount, 0);
+      const { el: m, close: c2 } = modal({
+        title: `${reg.length} ${reg.length === 1 ? 'spelare registrerad' : 'spelare registrerade'}`, wide: true,
+        body: `<div class="notice ok">${icon('check')}<div>Registreringen är klar. Totalt <b>${kr(total)}</b>.</div></div>
+          <div class="tbl-wrap"><table class="tbl compact"><thead><tr><th>Bötesnummer</th><th>Spelare</th><th>Period</th><th class="r">Belopp</th></tr></thead><tbody>
+          ${reg.map((r) => `<tr><td><b>${esc(r.fine_no)}</b></td><td>${esc(r.name)} ${demoTag(r.is_demo)}</td><td>${fmtDate(r.period_start)} – ${fmtDate(r.period_end)}</td><td class="r">${kr(r.amount)}</td></tr>`).join('')}</tbody></table></div>
+          <div class="actions"><button class="btn primary" data-ok>Klart</button></div>`,
+      });
+      m.querySelector('[data-ok]').onclick = c2;
+      toast(`${reg.length} spelare registrerade för 2 veckor utan böter.`);
+      refresh();
+    } catch (err) {
+      close();
+      if (err.code === 'none_eligible') info('Ingen kvalificerar just nu', esc(err.message));
+      else if (err.code === 'list_changed') { info('Listan har ändrats', `${esc(err.message)}`); refresh(); }
+      else fail(err);
+    }
+  });
 }

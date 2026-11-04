@@ -16004,8 +16004,23 @@ var require_logic = __commonJS({
       });
     }
     var sharesTop = (ranked) => ranked.filter((r) => r.place === 1);
+    var MONTHS_SV = ["Januari", "Februari", "Mars", "April", "Maj", "Juni", "Juli", "Augusti", "September", "Oktober", "November", "December"];
+    function seasonMonthList(season) {
+      return monthsBetween(monthOf(season.start_date), monthOf(season.end_date));
+    }
+    function activeMonth(settings, season, today = todayStr()) {
+      const list = seasonMonthList(season);
+      if (isMonth(settings.active_month) && list.includes(settings.active_month)) return settings.active_month;
+      const m = monthOf(today);
+      return m < list[0] ? list[0] : m > list[list.length - 1] ? list[list.length - 1] : m;
+    }
+    var monthNameSv = (ym) => MONTHS_SV[Number(ym.slice(5, 7)) - 1];
+    var swishMessage = (settings, season) => `B\xF6ter ${monthNameSv(activeMonth(settings, season))}`;
     function dashboard(st, settings) {
       const month = monthOf(st.today);
+      const am = activeMonth(settings, st.season, st.today);
+      const amFines = st.fines.filter((f) => !f.voided && monthOf(f.issued_date) === am);
+      const unpaidFines = st.fines.filter((f) => !f.voided && f.remaining > 0);
       const active = st.players.filter((p) => p.active);
       const liveFines = st.fines.filter((f) => !f.voided);
       const livePays = st.payments.filter((p) => !p.reversed);
@@ -16037,7 +16052,13 @@ var require_logic = __commonJS({
         recent_fines: [...st.fines].sort((a, b) => b.id - a.id).slice(0, 8).map(slimFine),
         recent_payments: [...st.payments].sort((a, b) => b.id - a.id).slice(0, 8).map(slimPayment),
         cash: cashSum.totals,
-        chart: monthlyChart(st)
+        chart: monthlyChart(st),
+        // De tre korten på startsidan – allt räknas fram ur databasen.
+        active_month: am,
+        active_month_name: monthNameSv(am),
+        active_month_fines: { amount: amFines.reduce((s, f) => s + f.amount, 0), count: amFines.length },
+        unpaid_fines: { amount: unpaidFines.reduce((s, f) => s + f.remaining, 0), count: unpaidFines.length, players: st.players.filter((p) => p.debt > 0).length },
+        debtors: st.players.filter((p) => p.debt > 0).sort((a, b) => b.debt - a.debt || a.name.localeCompare(b.name, "sv")).map((p) => ({ id: p.id, name: p.name, jersey: p.jersey, debt: p.debt, unpaid_count: p.unpaid_count, overdue_amount: p.overdue_amount, is_demo: p.is_demo }))
       };
     }
     function slimPlayer(p) {
@@ -16255,6 +16276,10 @@ var require_logic = __commonJS({
         closing,
         payment_info: settings.payment_info,
         team_name: settings.team_name,
+        swish_number: settings.swish_number || "",
+        swish_name: settings.swish_name || "",
+        swish_message: swishMessage(settings, st.season),
+        active_month: activeMonth(settings, st.season, st.today),
         open: openRows,
         total_open: openRows.reduce((s, r) => s + r.amount, 0),
         overdue: st.fines.filter((f) => f.overdue && f.due_date <= end).map((f) => ({ ...slimFine(f), due_date: f.due_date, remaining: f.remaining })),
@@ -16283,6 +16308,11 @@ var require_logic = __commonJS({
       isoWeek,
       activeSeason,
       getSettings,
+      activeMonth,
+      seasonMonthList,
+      monthNameSv,
+      swishMessage,
+      MONTHS_SV,
       loadState,
       rank,
       dashboard,
@@ -16582,7 +16612,7 @@ var require_ops = __commonJS({
       description, quantity, amount, base_amount, discount_amount, discount_pct, report_id, ref_fine_id, rule_key, calc, registered_by, is_demo, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, no, season.id, player.id, cat.id, cat.name, cat.number, cat.kind, issued, due, description, quantity, d.final, amount, d.discount, d.pct, reportId, refId, ruleKey, calc, who(user), isDemo ? 1 : 0, now());
       } catch (e) {
         if (e.code === "23505" && reportId) fail("Anm\xE4lan har redan blivit en bot.", 409, "already_decided");
-        if (e.code === "23505" && ruleKey) fail(`${player.first_name} ${player.last_name} har redan f\xE5tt bot nr ${cat.number} f\xF6r denna period.`, 409, "duplicate_rule");
+        if (e.code === "23505" && ruleKey && (!e.constraint || e.constraint === "fines_rule_unique")) fail(`${player.first_name} ${player.last_name} har redan f\xE5tt bot nr ${cat.number} f\xF6r denna period.`, 409, "duplicate_rule");
         throw e;
       }
       await audit(db, user, "Bot registrerad", "bot", no, null, { spelare: `${player.first_name} ${player.last_name}`, kategori: `${cat.number}. ${cat.name}`, belopp: kr(d.final), ...d.discount ? { ordinarie: kr(amount), juniorrabatt: kr(d.discount) } : {}, datum: issued, f\u00F6rfaller: due, beskrivning: description, ber\u00E4kning: calc });
@@ -16875,6 +16905,36 @@ var require_ops = __commonJS({
         return out;
       });
     }
+    async function applyRule22All(db, user, season, body) {
+      const settings = await L.getSettings(db);
+      if (settings.rule22_enabled !== "1") fail("Regel 22 \xE4r avst\xE4ngd under Inst\xE4llningar.");
+      const confirmed = Array.isArray(body.confirmed_player_ids) ? [...new Set(body.confirmed_player_ids.map(String))].sort() : null;
+      if (!confirmed) fail("Bekr\xE4ftelsen saknas. Ladda om sidan och f\xF6rs\xF6k igen.");
+      return tx(async (db2) => {
+        const st = await L.loadState(db2, season);
+        const eligible = L.rule22Candidates(st, settings).rows.filter((r) => r.eligible);
+        if (!eligible.length) fail("Ingen spelare uppfyller kravet p\xE5 tv\xE5 veckor utan b\xF6ter just nu.", 409, "none_eligible");
+        const now2 = eligible.map((r) => r.player_id).sort();
+        if (now2.length !== confirmed.length || now2.some((id, i) => id !== confirmed[i])) {
+          fail("Listan \xF6ver kvalificerade spelare har \xE4ndrats sedan du bekr\xE4ftade. Ingen registrerades \u2013 kontrollera listan och f\xF6rs\xF6k igen.", 409, "list_changed");
+        }
+        const catId = (await catByNumber(db2, 22)).id;
+        const out = [];
+        for (const c of eligible) {
+          const fineNo = await insertFine(
+            db2,
+            user,
+            season,
+            { player_id: c.player_id, category_id: catId, issued_date: L.todayStr(), description: `Inga b\xF6ter ${c.period_start} \u2013 ${c.period_end}` },
+            { ruleKey: c.rule_key, allowRuleKind: true, isDemo: !!c.is_demo }
+          );
+          const f = await db2.get("SELECT amount FROM fines WHERE fine_no = ?", fineNo);
+          out.push({ fine_no: fineNo, player_id: c.player_id, name: c.name, period_start: c.period_start, period_end: c.period_end, amount: f.amount, is_demo: c.is_demo });
+        }
+        await audit(db2, user, "Regel 22 registrerad f\xF6r alla kvalificerade", "regel", "22", null, { antal: out.length, b\u00F6ter: out.map((r) => `${r.fine_no} ${r.name}`) });
+        return { registered: out };
+      });
+    }
     async function closeMonth(db, user, season, period, body) {
       if (!L.isMonth(period)) fail("Ogiltig m\xE5nad.");
       return tx(async (db2) => {
@@ -16908,6 +16968,11 @@ var require_ops = __commonJS({
         if (body.swish_name != null) next.swish_name = str(body.swish_name, "Mottagarens namn", { max: 50 });
         if (body.start_balance != null) next.start_balance = String(parseKr(String(body.start_balance), "Startsaldo", { allowZero: true }));
         for (const k of ["rule22_enabled", "rule23_enabled", "rule29_enabled"]) if (body[k] != null) next[k] = body[k] ? "1" : "0";
+        if (body.active_month != null) {
+          const season = await L.activeSeason(db2);
+          if (!L.isMonth(body.active_month) || !L.seasonMonthList(season).includes(body.active_month)) fail(`Aktiv m\xE5nad m\xE5ste vara en m\xE5nad inom s\xE4songen ${season.name}.`);
+          next.active_month = body.active_month;
+        }
         if (body.rule22_days != null) {
           const d = Number(body.rule22_days);
           if (!Number.isInteger(d) || d < 7 || d > 60) fail("Antal dagar f\xF6r regel 22 m\xE5ste vara 7\u201360.");
@@ -17135,6 +17200,7 @@ var require_ops = __commonJS({
       setPaymentPermission,
       swishNumber,
       juniorDiscount,
+      applyRule22All,
       createFines,
       editFine,
       voidFine,
@@ -17244,10 +17310,10 @@ var require_app = __commonJS({
     } : null;
     var canRegisterPayments = (u) => u.role === "admin" || u.role === "player" && u.can_register_payments === true;
     var swishMsgSafe = (t) => String(t).normalize("NFC").replace(/[^0-9A-Za-zÅÄÖåäöÉéÜü \-]/g, "").replace(/\s+/g, " ").trim();
-    function swishInfo(settings, p) {
+    function swishInfo(settings, p, season2) {
       const number = settings.swish_number || "";
       const amountOre = Math.max(0, p.debt);
-      const message = swishMsgSafe(`B\xF6ter ${p.id} ${p.jersey ? `nr ${p.jersey} ` : ""}${p.first_name} ${p.last_name}`).slice(0, 50);
+      const message = swishMsgSafe(L.swishMessage(settings, season2)).slice(0, 50);
       const amt = amountOre % 100 ? (amountOre / 100).toFixed(2) : String(amountOre / 100);
       const url = number && amountOre > 0 ? `https://app.swish.nu/1/p/sw/?sw=${encodeURIComponent(number)}&amt=${encodeURIComponent(amt)}&cur=SEK&msg=${encodeURIComponent(message)}&src=qr` : null;
       return {
@@ -17388,8 +17454,9 @@ var require_app = __commonJS({
     GET("/api/month", "auth", async ({ db, query }) => {
       const st = await state(db);
       const q = query.get("period");
-      const period = L.isMonth(q) ? q : L.monthOf(st.today);
-      return L.monthView(db, st, period, await L.getSettings(db));
+      const s = await L.getSettings(db);
+      const period = L.isMonth(q) ? q : L.activeMonth(s, st.season, st.today);
+      return L.monthView(db, st, period, s);
     });
     GET("/api/cash", "auth", async ({ db }) => L.cashSummary(await state(db), await L.getSettings(db)));
     GET("/api/rules", "auth", async ({ db, query }) => {
@@ -17402,8 +17469,23 @@ var require_app = __commonJS({
     });
     GET("/api/settings", "auth", async ({ db, user }) => {
       const s = await L.getSettings(db);
-      const out = { team_name: s.team_name, payment_info: s.payment_info, swish_number: s.swish_number || "", swish_name: s.swish_name || "", season: await season(db), today: L.todayStr(), demo: !!await db.get("SELECT 1 AS x FROM players WHERE is_demo=1 LIMIT 1"), methods: O.METHODS };
-      if (user.role === "admin") Object.assign(out, s, { start_balance: Number(s.start_balance) });
+      const se = await season(db);
+      const am = L.activeMonth(s, se);
+      const out = {
+        team_name: s.team_name,
+        payment_info: s.payment_info,
+        swish_number: s.swish_number || "",
+        swish_name: s.swish_name || "",
+        season: se,
+        active_month: am,
+        active_month_name: L.monthNameSv(am),
+        swish_message: swishMsgSafe(L.swishMessage(s, se)).slice(0, 50),
+        season_months: L.seasonMonthList(se),
+        today: L.todayStr(),
+        demo: !!await db.get("SELECT 1 AS x FROM players WHERE is_demo=1 LIMIT 1"),
+        methods: O.METHODS
+      };
+      if (user.role === "admin") Object.assign(out, s, { start_balance: Number(s.start_balance), active_month: am });
       return out;
     });
     var ok = { ok: true };
@@ -17442,6 +17524,7 @@ var require_app = __commonJS({
       await O.voidCashEvent(db, user, params.id, body);
       return ok;
     });
+    POST("/api/rules/22/all", "admin", async ({ db, user, body }) => O.applyRule22All(db, user, await season(db), body));
     POST("/api/rules/:rule", "admin", async ({ db, user, params, body }) => ({ fine_nos: await O.applyRule(db, user, await season(db), params.rule, body) }));
     POST("/api/month/:period/close", "admin", async ({ db, user, params, body }) => {
       await O.closeMonth(db, user, await season(db), params.period, body);
@@ -17485,7 +17568,7 @@ var require_app = __commonJS({
       const st = await state(db);
       const p = st.playerById.get(user.player_id);
       if (!p) O.fail("Spelaren finns inte.", 404);
-      return { ...swishInfo(await L.getSettings(db), p), debt: p.debt, credit: Math.max(0, p.credit), player: { id: p.id, name: p.name, jersey: p.jersey } };
+      return { ...swishInfo(await L.getSettings(db), p, st.season), debt: p.debt, credit: Math.max(0, p.credit), player: { id: p.id, name: p.name, jersey: p.jersey } };
     });
     GET("/api/verify/overview", "payments", async ({ db, user }) => {
       const st = await state(db);

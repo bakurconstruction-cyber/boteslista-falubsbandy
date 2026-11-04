@@ -70,9 +70,31 @@ Kortkommandon: **N** = ny bot, **B** = ny inbetalning.
 ## Swish – betala sin skuld
 
 - Administratören anger kassans Swish-nummer och mottagarnamn under **Inställningar → Allmänt**.
-- På spelarens egen sida finns **Betala din skuld med Swish**. Knappen öppnar Swish med mottagare, belopp (aktuell skuld) och meddelandet `Böter S-xxx nr NN Förnamn Efternamn` förifyllt. Det är samma länkformat som Swish egna QR-koder använder (`https://app.swish.nu/1/p/sw/?sw=…&amt=…&cur=SEK&msg=…`). På Android används en intent-länk direkt till Swish-appen, och på datorn visas en QR-kod att skanna.
+- På spelarens egen sida finns **Betala din skuld med Swish**. Knappen öppnar Swish med mottagare, belopp (aktuell skuld) och meddelandet **`Böter [Aktiv månad]`** förifyllt, t.ex. `Böter November`. Samma meddelande används i QR-koden, i "Kopiera betalningsuppgifter", i påminnelserna och som referens när kassören registrerar betalningen. Det är samma länkformat som Swish egna QR-koder använder (`https://app.swish.nu/1/p/sw/?sw=…&amt=…&cur=SEK&msg=…`). På Android används en intent-länk direkt till Swish-appen, och på datorn visas en QR-kod att skanna.
 - **Kopiera betalningsuppgifter** är reservlösningen om Swish inte öppnas.
 - Spelaren granskar och godkänner alltid själv i Swish. **Ingenting markeras som betalt** av knappen. Betalningen registreras först när kassören har kontrollerat att pengarna kommit in. Privata Swish-nummer har inget API som kan bekräfta betalningar automatiskt – det kräver Swish Handel (företags-/föreningsavtal via bank och certifikat).
+
+## Aktiv månad
+
+- Administratören väljer **aktiv månad** på startsidan (kortet "Böter …") eller under **Inställningar → Allmänt**. Den sparas i databasen (`settings.active_month`) och ändras bara när administratören byter den – aldrig automatiskt efter datum.
+- Styr: Swish-meddelandet (`Böter November`), startsidans tredje kort och vilken månad **Månadsskifte** öppnar på.
+- Startvärde vid uppdateringen: innevarande månad (svensk tid), inom säsongen.
+
+## Startsidan
+
+Tre stora kort högst upp, alla räknade ur databasen:
+1. **Total kassa** – startsaldo + inbetalningar + övriga inkomster − återbetalningar − utgifter (samma som Kassa-sidan).
+2. **Obetalda böter** – det som återstår att betala på alla aktiva (ej makulerade) böter, plus antal obetalda böter och antal spelare.
+3. **Böter [aktiv månad]** – summa och antal böter registrerade (utfärdade) under aktiv månad. Makulerade räknas inte.
+
+Under korten: senaste böter, senaste betalningar och spelare med obetalda böter. På mobil ligger de tre korten först, före knapparna.
+
+## Registrera 2 veckor utan böter (regel 22 för alla)
+
+- Knappen **Registrera 2 veckor utan böter** finns för administratören på startsidan och på sidan **Regler**.
+- Regeln är oförändrad: en aktiv spelare kvalificerar när en hel period på 14 dagar (inställbart) har passerat utan böter. Perioden räknas från dagen efter senaste boten, eller från säsongsstart/när spelaren lades till. Registreringen är bot nr 22 med böteslistans belopp, daterad i dag. Den blir spelarens senaste bot, så en ny period börjar.
+- Knappen visar först en bekräftelse med alla kvalificerade spelare och perioder. Därefter registreras alla i **en databastransaktion**: misslyckas en enda, registreras ingen. Har listan ändrats sedan bekräftelsen avbryts allt.
+- Varje spelare får en egen bot med eget bötesnummer. Resultatet visas med bötesnummer och belopp. Samma period kan aldrig registreras två gånger (unik `rule_key` i databasen). Kvalificerar ingen visas ett tydligt meddelande.
 
 ## Kassabehörighet (t.ex. Johannes)
 
@@ -105,7 +127,7 @@ Varje beslut skickar anmälans id, anmälningsnummer och den status som visades.
 npm test
 ```
 
-Testerna kör hela API:t mot en tillfällig databas och täcker: behörigheter, registrering och löpande bötesnummer, delbetalning, full betalning, överbetalning/tillgodohavande/återbetalning, makulering, förseningsbot vid månadsskifte (inkl. dubblettskydd), planterad bot, klubbberäkning, leaderboard med delade placeringar, kassasaldo efter betalningar/utgifter/återföring, ändringslogg, export, CSV-import och att exempeldata kan tas bort utan att röra riktiga data.
+Testerna kör hela API:t mot en tillfällig databas och täcker bl.a. regel 22 för alla (kvalificerade/icke kvalificerade, behörighet, ändrad lista, fel mitt i transaktionen, dubbletter), aktiv månad, Swish-meddelandet för olika månader, startsidans tre kort samt: behörigheter, registrering och löpande bötesnummer, delbetalning, full betalning, överbetalning/tillgodohavande/återbetalning, makulering, förseningsbot vid månadsskifte (inkl. dubblettskydd), planterad bot, klubbberäkning, leaderboard med delade placeringar, kassasaldo efter betalningar/utgifter/återföring, ändringslogg, export, CSV-import och att exempeldata kan tas bort utan att röra riktiga data.
 
 ## Säkerhetskopiering
 

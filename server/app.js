@@ -87,10 +87,11 @@ const canRegisterPayments = (u) => u.role === 'admin' || (u.role === 'player' &&
 // Swish egna QR-koder innehåller (app.swish.nu): den öppnar Swish med mottagare, belopp och meddelande
 // förifyllt. Spelaren granskar och godkänner själv i Swish. Ingenting registreras som betalt här.
 const swishMsgSafe = (t) => String(t).normalize('NFC').replace(/[^0-9A-Za-zÅÄÖåäöÉéÜü \-]/g, '').replace(/\s+/g, ' ').trim();
-function swishInfo(settings, p) {
+function swishInfo(settings, p, season) {
   const number = settings.swish_number || '';
   const amountOre = Math.max(0, p.debt);
-  const message = swishMsgSafe(`Böter ${p.id} ${p.jersey ? `nr ${p.jersey} ` : ''}${p.first_name} ${p.last_name}`).slice(0, 50);
+  // Meddelandet följer Böteskassans aktiva månad (vald av administratören), t.ex. "Böter November".
+  const message = swishMsgSafe(L.swishMessage(settings, season)).slice(0, 50);
   const amt = amountOre % 100 ? (amountOre / 100).toFixed(2) : String(amountOre / 100);
   const url = number && amountOre > 0
     ? `https://app.swish.nu/1/p/sw/?sw=${encodeURIComponent(number)}&amt=${encodeURIComponent(amt)}&cur=SEK&msg=${encodeURIComponent(message)}&src=qr` : null;
@@ -220,8 +221,9 @@ GET('/api/leaderboard', 'auth', async ({ db, query }) => L.leaderboard(await sta
 GET('/api/month', 'auth', async ({ db, query }) => {
   const st = await state(db);
   const q = query.get('period');
-  const period = L.isMonth(q) ? q : L.monthOf(st.today);
-  return L.monthView(db, st, period, await L.getSettings(db));
+  const s = await L.getSettings(db);
+  const period = L.isMonth(q) ? q : L.activeMonth(s, st.season, st.today);
+  return L.monthView(db, st, period, s);
 });
 GET('/api/cash', 'auth', async ({ db }) => L.cashSummary(await state(db), await L.getSettings(db)));
 GET('/api/rules', 'auth', async ({ db, query }) => {
@@ -233,8 +235,11 @@ GET('/api/rules', 'auth', async ({ db, query }) => {
 });
 GET('/api/settings', 'auth', async ({ db, user }) => {
   const s = await L.getSettings(db);
-  const out = { team_name: s.team_name, payment_info: s.payment_info, swish_number: s.swish_number || '', swish_name: s.swish_name || '', season: await season(db), today: L.todayStr(), demo: !!(await db.get('SELECT 1 AS x FROM players WHERE is_demo=1 LIMIT 1')), methods: O.METHODS };
-  if (user.role === 'admin') Object.assign(out, s, { start_balance: Number(s.start_balance) });
+  const se = await season(db);
+  const am = L.activeMonth(s, se);
+  const out = { team_name: s.team_name, payment_info: s.payment_info, swish_number: s.swish_number || '', swish_name: s.swish_name || '', season: se,
+    active_month: am, active_month_name: L.monthNameSv(am), swish_message: swishMsgSafe(L.swishMessage(s, se)).slice(0, 50), season_months: L.seasonMonthList(se), today: L.todayStr(), demo: !!(await db.get('SELECT 1 AS x FROM players WHERE is_demo=1 LIMIT 1')), methods: O.METHODS };
+  if (user.role === 'admin') Object.assign(out, s, { start_balance: Number(s.start_balance), active_month: am });
   return out;
 });
 
@@ -254,6 +259,7 @@ POST('/api/payments', 'admin', async ({ db, user, body }) => O.createPayment(db,
 POST('/api/payments/:id/reverse', 'admin', async ({ db, user, params, body }) => { await O.reversePayment(db, user, await season(db), params.id, body); return ok; });
 POST('/api/cash', 'admin', async ({ db, user, body }) => ({ event_no: await O.createCashEvent(db, user, await season(db), body) }));
 POST('/api/cash/:id/void', 'admin', async ({ db, user, params, body }) => { await O.voidCashEvent(db, user, params.id, body); return ok; });
+POST('/api/rules/22/all', 'admin', async ({ db, user, body }) => O.applyRule22All(db, user, await season(db), body));
 POST('/api/rules/:rule', 'admin', async ({ db, user, params, body }) => ({ fine_nos: await O.applyRule(db, user, await season(db), params.rule, body) }));
 POST('/api/month/:period/close', 'admin', async ({ db, user, params, body }) => { await O.closeMonth(db, user, await season(db), params.period, body); return ok; });
 PUT('/api/settings', 'admin', async ({ db, user, body }) => { await O.updateSettings(db, user, body); return ok; });
@@ -290,7 +296,7 @@ GET('/api/me/swish', 'player', async ({ db, user }) => {
   const st = await state(db);
   const p = st.playerById.get(user.player_id);
   if (!p) O.fail('Spelaren finns inte.', 404);
-  return { ...swishInfo(await L.getSettings(db), p), debt: p.debt, credit: Math.max(0, p.credit), player: { id: p.id, name: p.name, jersey: p.jersey } };
+  return { ...swishInfo(await L.getSettings(db), p, st.season), debt: p.debt, credit: Math.max(0, p.credit), player: { id: p.id, name: p.name, jersey: p.jersey } };
 });
 
 // ---------- Registrera verifierade betalningar (administratör eller spelare med kassabehörighet) ----------

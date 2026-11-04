@@ -1,10 +1,11 @@
 // Sidor: Leaderboard, Månadsskifte, Regler, Kassa, Inställningar
-import { S, get, post, put, del, esc, kr, krPlain, num, pct, fmtDate, fmtTs, monthName, seasonMonths, today, demoTag, placeBadge, icon, isAdmin, barChart, empty, confirmDialog, toast, fail, busy, formData, copyText, reminderText, modal, ROLE, juniorTag } from './core.js';
-import { cashForm, fineDetail, accountForm } from './forms.js';
+import { S, get, post, put, del, esc, kr, krPlain, num, pct, fmtDate, fmtTs, monthName, seasonMonths, today, demoTag, placeBadge, icon, isAdmin, barChart, empty, confirmDialog, toast, fail, busy, formData, copyText, reminderText, payInstruction, modal, ROLE, juniorTag } from './core.js';
+import { cashForm, fineDetail, accountForm, rule22AllFlow } from './forms.js';
 import { refresh, loadSettings } from './app.js';
 
 const kpi = (label, value, cls = '', sub = '') => `<div class="kpi ${cls}"><small>${label}</small><b>${value}</b>${sub ? `<span>${sub}</span>` : ''}</div>`;
-const currentMonth = () => { const m = today().slice(0, 7); const ms = seasonMonths(); return ms.includes(m) ? m : m < ms[0] ? ms[0] : ms[ms.length - 1]; };
+// Standardmånad = Böteskassans aktiva månad (vald av administratören), annars innevarande.
+const currentMonth = () => { if (S.settings?.active_month) return S.settings.active_month; const m = today().slice(0, 7); const ms = seasonMonths(); return ms.includes(m) ? m : m < ms[0] ? ms[0] : ms[ms.length - 1]; };
 const monthSelect = (sel, attr = 'data-month', onlyEnded = false) => `<select ${attr}>${seasonMonths().filter((m) => !onlyEnded || m < today().slice(0, 7)).map((m) => `<option value="${m}" ${m === sel ? 'selected' : ''}>${monthName(m)}</option>`).join('')}</select>`;
 const who = (arr, f) => (arr.length ? arr.map((x) => `<a href="#/spelare/${esc(x.id)}">${esc(x.name)}</a>`).join(', ') + (f ? `<small>${f(arr[0])}</small>` : '') : '<span class="muted">–</span>');
 
@@ -110,7 +111,7 @@ export async function month(el) {
     const fr = e.target.closest('[data-fine]'); if (fr) return fineDetail(fr.dataset.fine);
     const a = e.target.closest('[data-act]'); if (!a) return;
     if (a.dataset.act === 'copyall') {
-      const txt = `Böteskassan ${d.team_name} – obetalt ${monthName(d.period)} (sista betalningsdag ${fmtDate(d.end)}):\n${d.open.map((x) => `• ${x.name}: ${kr(x.amount)}${x.overdue_amount ? ` (varav ${kr(x.overdue_amount)} försenat)` : ''}`).join('\n')}\nBetala till: ${d.payment_info}. Märk med namn och bötesnummer.`;
+      const txt = `Böteskassan ${d.team_name} – obetalt ${monthName(d.period)} (sista betalningsdag ${fmtDate(d.end)}):\n${d.open.map((x) => `• ${x.name}: ${kr(x.amount)}${x.overdue_amount ? ` (varav ${kr(x.overdue_amount)} försenat)` : ''}`).join('\n')}\n${payInstruction(d)}`;
       copyText(txt);
     } else if (a.dataset.act === 'close') {
       const { el: m, close } = modal({ title: `Stäm av ${monthName(d.period)}`, body: `<p class="lead">Bekräfta att inbetalningarna för perioden är kontrollerade mot Swish/bank.</p><label class="field"><span>Anteckning (valfri)</span><input name="note" maxlength="500"></label><div class="actions"><button class="btn ghost" data-c>Avbryt</button><button class="btn primary" data-ok>Markera som avstämd</button></div>` });
@@ -143,7 +144,7 @@ export async function rules(el) {
   el.innerHTML = `
   <div class="page-h"><div><h1>Särskilda regler</h1><p class="muted">Regel 22, 23 och 29. Slå på/av under <a href="#/installningar">Inställningar</a>.</p></div></div>
   <div class="notice">${icon('info')}<div><b>Inga böter registreras automatiskt.</b> Appen räknar fram förslag (automatiskt). Varje bot registreras först när en administratör godkänner den. Dubbletter för samma period stoppas av databasen.</div></div>
-  <section class="card rule"><header><h2><span class="catno">22</span> Inga böter på ${d.r22.days} dagar – 20 kr</h2>${tag(d.r22.enabled)}</header>
+  <section class="card rule"><header><h2><span class="catno">22</span> Inga böter på ${d.r22.days} dagar – 20 kr</h2><div class="btns">${tag(d.r22.enabled)}${admin && d.r22.enabled ? `<button type="button" class="btn small primary" data-r22all>${icon('check')} Registrera 2 veckor utan böter${elig.length ? ` (${elig.length})` : ''}</button>` : ''}</div></header>
     <p class="muted small">Föreslås när en aktiv spelare haft en sammanhängande period på ${d.r22.days} dagar utan böter. Perioden räknas från senaste boten (eller säsongsstart). När boten registreras startar en ny period.</p>
     <form data-r22><div class="tbl-wrap"><table class="tbl"><thead><tr><th></th><th>Spelare</th><th>Senaste bot</th><th class="r">Dagar utan böter</th><th>Period</th><th>Status</th></tr></thead><tbody>
     ${d.r22.rows.map((r) => `<tr class="${r.eligible ? '' : 'dim'}"><td>${r.eligible && admin && d.r22.enabled ? `<input type="checkbox" name="p" value="${esc(r.player_id)}">` : ''}</td><td>${esc(r.name)} ${demoTag(r.is_demo)}</td><td>${fmtDate(r.last_fine)}</td><td class="r">${Math.max(0, r.days_without)}</td><td><small>${fmtDate(r.period_start)} – ${fmtDate(r.period_end)}</small></td><td>${r.eligible ? '<span class="pill amber">Uppfyller regeln</span>' : '<span class="muted small">Ej aktuell</span>'}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">Inga aktiva spelare.</td></tr>'}
@@ -163,6 +164,7 @@ export async function rules(el) {
       </tbody></table>${admin && d.r29.enabled && d.r29.rows.some((r) => !r.existing) ? '<div class="actions"><button class="btn primary">Registrera förseningsbot för valda</button></div>' : ''}</form>` : empty('Alla hade betalat i tid för perioden.')}
   </section>`;
   el.onchange = (e) => { if (e.target.matches('[data-r29month]')) { rulePeriod = e.target.value; rules(el); } };
+  el.querySelector('[data-r22all]')?.addEventListener('click', () => rule22AllFlow());
   const bind = (sel, rule, extra = {}) => el.querySelector(sel)?.addEventListener('submit', async (e) => {
     e.preventDefault();
     const ids = [...e.target.querySelectorAll('[name=p]:checked')].map((i) => i.value);
@@ -239,7 +241,9 @@ export async function settings(el) {
       <label class="field"><span>Betalningsinformation (visas i påminnelser)</span><input name="payment_info" value="${esc(s.payment_info)}" required maxlength="300"></label>
       <div class="grid2"><label class="field"><span>Swish-nummer som spelarna betalar till</span><input name="swish_number" value="${esc(s.swish_number)}" inputmode="tel" placeholder="070-123 45 67 eller 123 456 78 90"></label>
       <label class="field"><span>Mottagarens namn (visas för spelarna)</span><input name="swish_name" value="${esc(s.swish_name)}" maxlength="50" placeholder="t.ex. Johannes – kassör"></label></div>
-      <p class="muted small">Används av knappen "Betala din skuld med Swish". Swish öppnas med numret, beloppet och ett meddelande som identifierar spelaren förifyllda – spelaren godkänner själv i Swish. Betalningar registreras ändå först när de kontrollerats.</p>
+      <p class="muted small">Används av knappen "Betala din skuld med Swish". Swish öppnas med numret, beloppet och meddelandet <b>"${esc(S.settings.swish_message)}"</b> förifyllda – spelaren godkänner själv i Swish. Betalningar registreras ändå först när de kontrollerats.</p>
+      <label class="field narrow-field"><span>Aktiv månad</span><select name="active_month">${(S.settings.season_months || seasonMonths()).map((m) => `<option value="${m}" ${m === S.settings.active_month ? 'selected' : ''}>${monthName(m)}</option>`).join('')}</select></label>
+      <p class="muted small">Styr Swish-meddelandet ("Böter November"), startsidans kort "Aktiv månads böter" och vilken månad Månadsskifte visar. Byts bara när du byter den här eller på startsidan.</p>
       <label class="field"><span>Startsaldo i kassan (kr)</span><input name="start_balance" inputmode="decimal" value="${krPlain(s.start_balance)}"></label>
       <div class="actions"><button class="btn primary">Spara</button></div></form>
       <form class="card form-card" data-season><h3>Säsong ${esc(s.season.name)}</h3><div class="grid2">
