@@ -141,8 +141,25 @@ function rank(rows, valueFn, dir = 'desc', tieFn) {
 const sharesTop = (ranked) => ranked.filter((r) => r.place === 1);
 
 // ---------- Dashboard ----------
+// Aktiv månad: vald av administratören (settings.active_month). Saknas den – t.ex. innan
+// migrationen körts – används innevarande månad inom säsongen, så att appen aldrig går sönder.
+const MONTHS_SV = ['Januari', 'Februari', 'Mars', 'April', 'Maj', 'Juni', 'Juli', 'Augusti', 'September', 'Oktober', 'November', 'December'];
+function seasonMonthList(season) { return monthsBetween(monthOf(season.start_date), monthOf(season.end_date)); }
+function activeMonth(settings, season, today = todayStr()) {
+  const list = seasonMonthList(season);
+  if (isMonth(settings.active_month) && list.includes(settings.active_month)) return settings.active_month;
+  const m = monthOf(today);
+  return m < list[0] ? list[0] : m > list[list.length - 1] ? list[list.length - 1] : m;
+}
+const monthNameSv = (ym) => MONTHS_SV[Number(ym.slice(5, 7)) - 1];
+// Swish-meddelandet: "Böter November". Hämtas alltid från aktiv månad, aldrig från dagens datum.
+const swishMessage = (settings, season) => `Böter ${monthNameSv(activeMonth(settings, season))}`;
+
 function dashboard(st, settings) {
   const month = monthOf(st.today);
+  const am = activeMonth(settings, st.season, st.today);
+  const amFines = st.fines.filter((f) => !f.voided && monthOf(f.issued_date) === am);
+  const unpaidFines = st.fines.filter((f) => !f.voided && f.remaining > 0);
   const active = st.players.filter((p) => p.active);
   const liveFines = st.fines.filter((f) => !f.voided);
   const livePays = st.payments.filter((p) => !p.reversed);
@@ -171,6 +188,12 @@ function dashboard(st, settings) {
     recent_payments: [...st.payments].sort((a, b) => b.id - a.id).slice(0, 8).map(slimPayment),
     cash: cashSum.totals,
     chart: monthlyChart(st),
+    // De tre korten på startsidan – allt räknas fram ur databasen.
+    active_month: am, active_month_name: monthNameSv(am),
+    active_month_fines: { amount: amFines.reduce((s, f) => s + f.amount, 0), count: amFines.length },
+    unpaid_fines: { amount: unpaidFines.reduce((s, f) => s + f.remaining, 0), count: unpaidFines.length, players: st.players.filter((p) => p.debt > 0).length },
+    debtors: st.players.filter((p) => p.debt > 0).sort((a, b) => b.debt - a.debt || a.name.localeCompare(b.name, 'sv'))
+      .map((p) => ({ id: p.id, name: p.name, jersey: p.jersey, debt: p.debt, unpaid_count: p.unpaid_count, overdue_amount: p.overdue_amount, is_demo: p.is_demo })),
   };
 }
 function slimPlayer(p) {
@@ -362,6 +385,7 @@ async function monthView(db, st, ym, settings) {
   const pays = st.payments.filter((p) => !p.reversed && p.date >= start && p.date <= end);
   return {
     period: ym, start, end, ended: end < st.today, closing, payment_info: settings.payment_info, team_name: settings.team_name,
+    swish_number: settings.swish_number || '', swish_name: settings.swish_name || '', swish_message: swishMessage(settings, st.season), active_month: activeMonth(settings, st.season, st.today),
     open: openRows,
     total_open: openRows.reduce((s, r) => s + r.amount, 0),
     overdue: st.fines.filter((f) => f.overdue && f.due_date <= end).map((f) => ({ ...slimFine(f), due_date: f.due_date, remaining: f.remaining })),
@@ -376,6 +400,6 @@ async function monthView(db, st, ym, settings) {
 
 module.exports = {
   TZ, todayStr, isDate, isMonth, addDays, daysBetween, monthOf, monthEnd, monthStart, defaultDueDate, weekStart, isoWeek,
-  activeSeason, getSettings, loadState, rank, dashboard, cashSummary, leaderboard, rule29Candidates, rule22Candidates,
+  activeSeason, getSettings, activeMonth, seasonMonthList, monthNameSv, swishMessage, MONTHS_SV, loadState, rank, dashboard, cashSummary, leaderboard, rule29Candidates, rule22Candidates,
   rule23Ranking, monthView, slimFine, slimPayment,
 };

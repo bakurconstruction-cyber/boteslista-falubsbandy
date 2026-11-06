@@ -159,7 +159,13 @@ export function reminderText(r, settings) {
   const list = r.fines.map((f) => `${f.fine_no} ${f.category} ${kr(f.remaining)}`).join(', ');
   return `Hej ${first}! Påminnelse från böteskassan (${settings.team_name}): du har ${kr(r.amount)} i obetalda böter (${list}). `
     + `Sista betalningsdag: ${fmtDate(r.earliest_due)}${r.overdue_amount ? ` – ${kr(r.overdue_amount)} är redan förfallet` : ''}. `
-    + `Betala till: ${settings.payment_info}. Märk betalningen med namn och bötesnummer. Tack!`;
+    + `${payInstruction(settings)} Tack!`;
+}
+// Betalningsinstruktion: Swish-nummer och meddelandet "Böter [Aktiv månad]" (från servern) om Swish är inlagt.
+export function payInstruction(settings) {
+  return settings.swish_number
+    ? `Swisha till ${fmtSwish(settings.swish_number)}${settings.swish_name ? ` (${settings.swish_name})` : ''} med meddelandet "${settings.swish_message}".`
+    : `Betala till: ${settings.payment_info}. Märk betalningen med "${settings.swish_message}".`;
 }
 
 // Enkel stapeldiagram-SVG (grupperade staplar)
